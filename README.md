@@ -13,7 +13,6 @@
     <a href="https://github.com/ulab-uiuc/LLMRouter/issues/136"><img src="https://img.shields.io/badge/💬WeChat-Group-07c160?style=for-the-badge&logo=wechat&logoColor=white&labelColor=1a1a2e"></a>
     <a href="https://ulab-uiuc.github.io/LLMRouter/" style="text-decoration:none;"><img src="https://img.shields.io/badge/DOCS-ONLINE-0A9EDC?style=for-the-badge&logo=readthedocs&logoColor=white" alt="Docs"></a>
     <a href="https://x.com/youjiaxuan/status/2005877938554589370" style="text-decoration:none;"><img src="https://img.shields.io/badge/TWITTER-ANNOUNCEMENTS-1DA1F2?style=for-the-badge&logo=x&logoColor=white" alt="Twitter"></a>
-    <a href="https://huggingface.co/datasets/ulab-ai/xRouteBench"><img src="https://img.shields.io/badge/HUGGING%20FACE-xRouteBench-FFD21E?style=for-the-badge&logo=huggingface&logoColor=white&labelColor=555555" alt="Hugging Face Dataset"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/LICENSE-MIT-2EA44F?style=for-the-badge" alt="License"></a>
   </p>
 </div>
