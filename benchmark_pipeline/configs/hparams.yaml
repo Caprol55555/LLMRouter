@@ -1,0 +1,107 @@
+# Per-router hyperparameters used by run_pipeline.py.
+# These mirror the settings used for the published xRouteBench baseline numbers.
+
+knnrouter:
+  n_neighbors: 5
+  weights: uniform
+  algorithm: auto
+  leaf_size: 30
+  p: 2
+  metric: minkowski
+  n_jobs: -1
+
+svmrouter:
+  kernel: rbf
+  C: 1.0
+  gamma: scale
+  probability: true
+
+mlprouter:
+  hidden_layer_sizes: [256, 128]
+  activation: relu
+  lr: 0.001
+  epochs: 100
+  batch_size: 32
+  alpha: 0.0001
+
+mfrouter:
+  latent_dim: 128
+  text_dim: 1024
+  lr: 0.001
+  epochs: 20
+  batch_size: 64
+  noise_alpha: 0.0
+
+elorouter: {}
+
+graphrouter:
+  hidden_dim: 256
+  learning_rate: 0.005
+  weight_decay: 0.0001
+  train_epoch: 300
+  batch_size: 8
+  train_mask_rate: 0.5
+  temperature: 0.1
+  val_split_ratio: 0.2
+  random_state: 42
+
+routerdc:
+  hidden_state_dim: 768
+  similarity_function: cosine
+  source_max_token_len: 512
+  target_max_token_len: 512
+  n_clusters: 3
+  learning_rate: 1.0e-05
+  batch_size: 16
+  training_steps: 2000
+  eval_steps: 200
+  gradient_accumulation: 1
+  temperature: 0.07
+  top_k: 1
+  last_k: 1
+  sample_loss_weight: 0.0
+  cluster_loss_weight: 0.0
+  H: 1.0
+  device: cuda
+  inference_temperature: 1.0
+  inference_batch_size: 64
+
+hybrid_llm:
+  hidden_layer_sizes: [128, 64]
+  max_iter: 500
+  random_state: 42
+
+largest_llm: {}
+smallest_llm: {}
+
+gmtrouter: {}
+personalizedrouter: {}
+
+causallm_router:
+  base_model: meta-llama/Llama-2-7b-hf
+  use_lora: true
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.1
+  merge_lora: true
+  num_epochs: 3
+  batch_size: 4
+  gradient_accumulation_steps: 4
+  learning_rate: 2.0e-05
+  max_length: 512
+  max_new_tokens: 32
+  temperature: 0.1
+  tensor_parallel_size: 1
+  gpu_memory_utilization: 0.9
+
+# API-calling routers (run with --include-api-routers; needs LLM_API_KEY)
+knnmultiroundrouter:
+  n_neighbors: 5
+  weights: uniform
+
+llmmultiroundrouter: {}
+
+router_r1: {}
+
+automix:
+  method: threshold
