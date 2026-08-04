@@ -59,6 +59,7 @@
 - [ComfyUI Interface](#-comfyui-interface)
 - [Creating Your Own Routers](#-creating-your-own-routers)
 - [Adding Your Own Tasks](#-adding-your-own-tasks)
+- [xRouteBench Benchmark Pipeline](#-xroutebench-benchmark-pipeline)
 - [OpenClaw Router (OpenClaw Integration)](#-openclaw-router-openclaw-integration)
 - [Acknowledgments](#-acknowledgments)
 - [Citation](#-citation)
@@ -738,6 +739,29 @@ For detailed guides on creating custom tasks:
 ### 🎥 Hands-on: Multi-View Video Tasks
 
 Follow our **step-by-step walkthrough** in the [Charades-Ego Integration Guide](data/charades_ego/README.md) to process paired egocentric videos, generate VLM-based features, and train routers for **Activity**, **Object**, and **Verb** recognition.
+
+## 📈 xRouteBench Benchmark Pipeline
+
+Reproduce the full router benchmark with one command. The
+[`benchmark_pipeline/`](benchmark_pipeline/) folder trains and evaluates
+**17 routers on the 8 [xRouteBench](https://huggingface.co/datasets/ulab-ai/xRouteBench)
+datasets** (classic NLP, memory, time-series, video, multimodal math,
+personalized), including cost-aware Pareto training with a composite
+`alpha * performance - beta * cost` reward.
+
+```bash
+cd benchmark_pipeline
+python download_data.py        # pull data from HF (ulab-ai/xRouteBench)
+python generate_embeddings.py  # Qwen3-Embedding-0.6B query embeddings
+python run_pipeline.py --datasets all --routers local   # 13 local routers, zero API cost
+python aggregate_results.py --csv                       # per-dataset tables + overall ranking
+```
+
+Evaluation **replays pre-recorded model executions** — every query in
+xRouteBench was pre-run against all 18 candidate LLMs — so the local-router
+sweep costs nothing to run. API-calling routers (multi-round, Router-R1,
+Automix) are available behind `--include-api-routers`. See
+[`benchmark_pipeline/README.md`](benchmark_pipeline/README.md) for details.
 
 ## 🔌 OpenClaw Router (OpenClaw Integration)
 
