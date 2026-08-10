@@ -937,11 +937,10 @@ Contributing to LLMRouter is more than adding code. It is an opportunity to **in
 If you find LLMRouter useful for your research or projects, please cite it as:
 
 ```bibtex
-@misc{llmrouter2025,
-  title        = {LLMRouter: An Open-Source Library for LLM Routing},
-  author       = {Tao Feng and Haozhen Zhang and Zijie Lei and Haodong Yue and Chongshan Lin and Ge Liu and Jiaxuan You},
-  year         = {2025},
-  howpublished = {\url{https://github.com/ulab-uiuc/LLMRouter}},
-  note         = {GitHub repository}
+@article{feng2026llmrouter,
+  title={LLMRouter: Unified Infrastructure for Developing, Evaluating, and Deploying LLM Routers},
+  author={Feng, Tao and Yu, Fangxu and Zhang, Haozhen and Dai, Zhongjie and Yuan, Liangqi and Lei, Zijie and Zhang, Weizhi and Zhu, Kunlun and Yue, Haodong and Xuan, Keyang and Liu, Ge and You, Jiaxuan},
+  journal={arXiv preprint arXiv:2608.06867},
+  year={2026}
 }
 ```
