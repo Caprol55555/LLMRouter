@@ -7,34 +7,15 @@
 
 <div align="center">
   <p>
-    <a href="https://www.python.org/downloads/release/python-3109/">
-      <img src="https://img.shields.io/badge/PYTHON-3.10-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python">
-    </a>
-    <a href="https://github.com/ulab-uiuc/LLMRouter/pulls">
-      <img src="https://img.shields.io/badge/PRS-WELCOME-orange?style=for-the-badge" alt="PRs">
-    </a>
-    <a href="https://join.slack.com/t/llmrouteropen-ri04588/shared_invite/zt-3mkx82cut-A25v5yR52xVKi7_jm_YK_w">
-      <img src="https://img.shields.io/badge/SLACK-JOIN%20US-4A154B?style=for-the-badge&logo=slack&logoColor=white" alt="Slack">
-    </a>
-    <a href="https://github.com/ulab-uiuc/LLMRouter/issues/136">
-      <img src="https://img.shields.io/badge/💬WeChat-Group-07c160?style=for-the-badge&logo=wechat&logoColor=white&labelColor=1a1a2e" alt="WeChat">
-    </a>
-    <a href="https://ulab-uiuc.github.io/LLMRouter/" style="text-decoration:none;">
-      <img src="https://img.shields.io/badge/DOCS-ONLINE-0A9EDC?style=for-the-badge&logo=readthedocs&logoColor=white" alt="Docs">
-    </a>
-    <a href="https://arxiv.org/abs/2608.06867">
-      <img src="https://img.shields.io/badge/PAPER-B31B1B?style=for-the-badge&logo=arxiv&logoColor=white" alt="Paper">
-    </a>
-    <a href="https://x.com/youjiaxuan/status/2005877938554589370" style="text-decoration:none;">
-      <img src="https://img.shields.io/badge/TWITTER-ANNOUNCEMENTS-1DA1F2?style=for-the-badge&logo=x&logoColor=white" alt="Twitter">
-    </a>
-    <a href="https://huggingface.co/datasets/ulab-ai/xRouteBench">
-      <img src="assets/hf-logo.svg" alt="xRouteBench" height="28">
-      <img src="https://img.shields.io/badge/HUGGING%20FACE-xRouteBench-FFD21E?style=for-the-badge&labelColor=555555" alt="xRouteBench Dataset" height="28">
-    </a>
-    <a href="LICENSE">
-      <img src="https://img.shields.io/badge/LICENSE-MIT-2EA44F?style=for-the-badge" alt="License">
-    </a>
+    <a href="https://www.python.org/downloads/release/python-3109/"><img src="https://img.shields.io/badge/PYTHON-3.10-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python"></a>
+    <a href="https://github.com/ulab-uiuc/LLMRouter/pulls"><img src="https://img.shields.io/badge/PRS-WELCOME-orange?style=for-the-badge" alt="PRs"></a>
+    <a href="https://join.slack.com/t/llmrouteropen-ri04588/shared_invite/zt-3mkx82cut-A25v5yR52xVKi7_jm_YK_w"><img src="https://img.shields.io/badge/SLACK-JOIN%20US-4A154B?style=for-the-badge&logo=slack&logoColor=white" alt="Slack"></a>
+    <a href="https://github.com/ulab-uiuc/LLMRouter/issues/136"><img src="https://img.shields.io/badge/💬WeChat-Group-07c160?style=for-the-badge&logo=wechat&logoColor=white&labelColor=1a1a2e" alt="WeChat"></a>
+    <a href="https://ulab-uiuc.github.io/LLMRouter/"><img src="https://img.shields.io/badge/DOCS-ONLINE-0A9EDC?style=for-the-badge&logo=readthedocs&logoColor=white" alt="Docs"></a>
+    <a href="https://arxiv.org/abs/2608.06867"><img src="https://img.shields.io/badge/PAPER-B31B1B?style=for-the-badge&logo=arxiv&logoColor=white" alt="Paper"></a>
+    <a href="https://x.com/youjiaxuan/status/2005877938554589370"><img src="https://img.shields.io/badge/TWITTER-ANNOUNCEMENTS-1DA1F2?style=for-the-badge&logo=x&logoColor=white" alt="Twitter"></a>
+    <a href="https://huggingface.co/datasets/ulab-ai/xRouteBench"><img src="assets/hf-logo.svg" alt="xRouteBench" height="28"><img src="https://img.shields.io/badge/HUGGING%20FACE-xRouteBench-FFD21E?style=for-the-badge&labelColor=555555" alt="xRouteBench Dataset" height="28"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/LICENSE-MIT-2EA44F?style=for-the-badge" alt="License"></a>
   </p>
 </div>
 
