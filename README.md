@@ -38,6 +38,8 @@
 
 ## 📰 News
 
+- 🔥 **[2026-08]**: We are honored to have **LLMRouter** featured among the top papers on 🤗 Hugging Face [Daily Papers](https://huggingface.co/papers/2608.06867).
+
 - 🚀 **[2026-08]: LLMRouter** - We've released LLMRouter, a unified infrastructure for developing, evaluating, and deploying LLM routers! LLMRouter formulates routing as a unified sequential decision process spanning single-turn, multi-turn, and personalized scenarios, and provides a modular framework with 16+ representative routing methods. It also introduces xRouteBench, a comprehensive benchmark covering generic LLM, memory-augmented, vision, time-series, and personalized routing, with automated supervision construction and joint evaluation of response quality and inference cost. Experiments show that learned routers outperform the strongest fixed-model baseline by 14.6% relatively, while lightweight and user-conditioned routers offer strong advantages under tight cost budgets and personalized settings. Check out the [paper](https://arxiv.org/abs/2608.06867) for details.
   
 - 📈 **[2026-07]**: **TSRouter** - We've released TSRouter, a multimodal router for time series reasoning! TSRouter routes each time series query to the best (modality, model) pair — text LLMs vs. visual/mix VLMs — via a 4-partite heterogeneous graph over task, query, modality, and model nodes, supports cost-aware routing scenarios and zero-shot generalization to unseen models and novel tasks, and ships with the full TSRBench data pipeline plus a converter to the standard LLMRouter data interface. Check out the [paper](https://arxiv.org/abs/2607.08940v1) for details.
