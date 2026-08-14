@@ -932,7 +932,13 @@ Contributing to LLMRouter is more than adding code. It is an opportunity to **in
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=ulab-uiuc/LLMRouter&type=date&legend=top-left)](https://www.star-history.com/#ulab-uiuc/LLMRouter&type=date&legend=top-left)
+<a href="https://www.star-history.com/?repos=ulab-uiuc%2FLLMRouter&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=ulab-uiuc/LLMRouter&type=date&theme=dark&legend=top-left&sealed_token=1k87aZ3E3KIfu5c6PXbB806RGR-OF1a5cZj0qdz2_EZ23zWHZUGyVKxcqyCsgl2WVTJua-_99MM3nzTnKzp701WeesY5zumRiltcUVHGyYUObL3ow0FdNw" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=ulab-uiuc/LLMRouter&type=date&legend=top-left&sealed_token=1k87aZ3E3KIfu5c6PXbB806RGR-OF1a5cZj0qdz2_EZ23zWHZUGyVKxcqyCsgl2WVTJua-_99MM3nzTnKzp701WeesY5zumRiltcUVHGyYUObL3ow0FdNw" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=ulab-uiuc/LLMRouter&type=date&legend=top-left&sealed_token=1k87aZ3E3KIfu5c6PXbB806RGR-OF1a5cZj0qdz2_EZ23zWHZUGyVKxcqyCsgl2WVTJua-_99MM3nzTnKzp701WeesY5zumRiltcUVHGyYUObL3ow0FdNw" />
+ </picture>
+</a>
 
 
 
