@@ -950,7 +950,7 @@ If you find LLMRouter useful for your research or projects, please cite it as:
 ```bibtex
 @article{feng2026llmrouter,
   title={LLMRouter: Unified Infrastructure for Developing, Evaluating, and Deploying LLM Routers},
-  author={Feng, Tao and Yu, Fangxu and Zhang, Haozhen and Dai, Zhongjie and Yuan, Liangqi and Lei, Zijie and Zhang, Weizhi and Zhu, Kunlun and Yue, Haodong and Xuan, Keyang and Liu, Ge and You, Jiaxuan},
+  author={Feng, Tao and Yu, Fangxu and Zhang, Haozhen and Dai, Zhongjie and Yuan, Liangqi and Lei, Zijie and Zhang, Weizhi and Zhu, Kunlun and Yue, Haodong and Xuan, Keyang and others},
   journal={arXiv preprint arXiv:2608.06867},
   year={2026}
 }
