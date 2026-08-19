@@ -405,6 +405,11 @@ class LLMBackend:
                 "model": llm.model_id,
                 "messages": normalized,
                 "max_tokens": adjusted_max,
+                # OpenAI-compatible gateways are not consistent about the
+                # default when this field is omitted. 9router treats an
+                # unspecified value as streaming, which cannot be decoded by
+                # this synchronous response path.
+                "stream": False,
             }
             if temperature is not None:
                 body["temperature"] = temperature
