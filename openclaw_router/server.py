@@ -11,6 +11,7 @@ Or directly:
 """
 
 import json
+import hmac
 import os
 import re
 import sys
@@ -18,8 +19,8 @@ from typing import AsyncGenerator, Optional, Dict, Any, List
 
 # Check dependencies
 try:
-    from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-    from fastapi.responses import StreamingResponse
+    from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+    from fastapi.responses import JSONResponse, StreamingResponse
     from pydantic import BaseModel
     import httpx
     import uvicorn
@@ -32,10 +33,24 @@ try:
     from .config import OpenClawConfig, LLMConfig, MODELS_WITHOUT_SYSTEM_ROLE, MODEL_CONTEXT_LIMITS
     from .routers import OpenClawRouter, _safe_log
     from .media import process_multimodal_content, MediaConfig
+    from .session_routing import (
+        SessionRouteCache,
+        count_user_turns,
+        derive_session_key,
+        detect_modality,
+        parse_auto_policy,
+    )
 except ImportError:
     from config import OpenClawConfig, LLMConfig, MODELS_WITHOUT_SYSTEM_ROLE, MODEL_CONTEXT_LIMITS
     from routers import OpenClawRouter, _safe_log
     from media import process_multimodal_content, MediaConfig
+    from session_routing import (
+        SessionRouteCache,
+        count_user_turns,
+        derive_session_key,
+        detect_modality,
+        parse_auto_policy,
+    )
 
 
 # ============================================================
@@ -82,6 +97,34 @@ def normalize_content(content: Any) -> str:
                 text_parts.append(part)
         return "\n".join(text_parts)
     return str(content) if content else ""
+
+
+def build_routing_context(messages: List[Dict[str, Any]], max_chars: int) -> str:
+    """Build a bounded judge context from user turns only; never include tool output."""
+    user_turns = [
+        normalize_content(message.get("content"))
+        for message in messages
+        if message.get("role") == "user"
+    ]
+    selected_turns = user_turns[-2:] or ["general query"]
+    context = "\n\n".join(
+        f"[user_turn_{index + 1}]\n{text}" for index, text in enumerate(selected_turns)
+    )
+    return context[: max(256, max_chars)]
+
+
+def _bearer_token(authorization: Optional[str]) -> str:
+    if not authorization:
+        return ""
+    scheme, _, token = authorization.partition(" ")
+    return token.strip() if scheme.lower() == "bearer" else ""
+
+
+def _authorized(authorization: Optional[str], expected: Optional[str]) -> bool:
+    if not expected:
+        return True
+    token = _bearer_token(authorization)
+    return bool(token) and hmac.compare_digest(token, expected)
 
 
 def normalize_messages(messages: List[Dict], model_id: str = "") -> List[Dict]:
@@ -422,9 +465,10 @@ class LLMBackend:
             ) as resp:
                 if resp.status_code != 200:
                     error = await resp.aread()
-                    print(f"[Backend Streaming] Error {resp.status_code}: {error.decode()[:200]}")
-                    yield f'data: {json.dumps({"error": error.decode()[:200]})}\n\n'
-                    return
+                    raise HTTPException(
+                        status_code=resp.status_code,
+                        detail=error.decode(errors="replace")[:500],
+                    )
 
                 async for line in resp.aiter_lines():
                     if line.startswith("data: "):
@@ -451,13 +495,79 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
     # Initialize components
     router = OpenClawRouter(config)
     backend = LLMBackend(config)
+    route_cache = (
+        SessionRouteCache(config.session_routing)
+        if config.session_routing.enabled
+        else None
+    )
+    app.state.router = router
+    app.state.backend = backend
+    app.state.route_cache = route_cache
+
+    @app.middleware("http")
+    async def require_v1_bearer(request: Request, call_next):
+        if request.url.path.startswith("/v1/") and not _authorized(
+            request.headers.get("authorization"), config.security.inbound_api_key
+        ):
+            return JSONResponse(
+                status_code=401,
+                content={"error": {"message": "Invalid API key", "type": "authentication_error"}},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return await call_next(request)
+
+    async def choose_request_model(
+        payload: ChatRequest,
+        messages: List[Dict[str, Any]],
+        session_header: Optional[str],
+    ):
+        available_models = list(config.llms.keys())
+        if payload.model in available_models:
+            _safe_log(f"[Route] explicit model={payload.model}")
+            return payload.model, None, False
+
+        policy = parse_auto_policy(payload.model, config.session_routing)
+        if policy is None:
+            raise HTTPException(status_code=404, detail=f"Model '{payload.model}' not found")
+
+        routing_context = build_routing_context(
+            messages, config.router.routing_context_chars
+        )
+        if route_cache is None:
+            selected = await router.select_model(routing_context, user=payload.user)
+            _safe_log(f"[Route] auto model={selected} cache=disabled")
+            return selected, None, False
+
+        session_key = derive_session_key(
+            messages,
+            user=payload.user,
+            header_value=session_header,
+            fallback_hash_chars=config.session_routing.fallback_hash_chars,
+        )
+        user_turns = count_user_turns(messages)
+        modality = detect_modality(messages)
+        selected, cache_hit = await route_cache.get_or_select(
+            session_key,
+            user_turns=user_turns,
+            policy=policy,
+            modality=modality,
+            allowed_models=available_models,
+            selector=lambda: router.select_model(routing_context, user=payload.user),
+        )
+        _safe_log(
+            f"[Route] session={session_key[:12]} model={selected} "
+            f"cache={'hit' if cache_hit else 'miss'} turns={user_turns} policy={policy.model_id}"
+        )
+        return selected, session_key, cache_hit
 
     @app.get("/health")
     async def health():
         return {
             "status": "ok",
             "strategy": config.router.strategy,
-            "llms": list(config.llms.keys())
+            "llms": list(config.llms.keys()),
+            "session_cache_entries": route_cache.size if route_cache else 0,
+            "commit": os.getenv("LLMROUTER_COMMIT_SHA", "unknown"),
         }
 
     @app.get("/v1/models")
@@ -467,14 +577,23 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
             "data": [
                 {"id": name, "object": "model", "description": llm.description}
                 for name, llm in config.llms.items()
-            ] + [{"id": "auto", "object": "model", "description": "Auto router"}]
+            ] + [
+                {"id": "auto", "object": "model", "description": "Session-aware auto router"},
+                {"id": "auto:once", "object": "model", "description": "Judge once per session TTL"},
+            ] + [
+                {
+                    "id": f"auto:{interval}",
+                    "object": "model",
+                    "description": f"Rejudge every {interval} new user turns",
+                }
+                for interval in config.session_routing.allowed_rejudge_intervals
+            ]
         }
 
     @app.post("/v1/chat/completions")
-    async def chat_completions(request: ChatRequest):
-        print(f"============\n")
+    async def chat_completions(payload: ChatRequest, http_request: Request):
         messages = []
-        for message in request.messages:
+        for message in payload.messages:
             message_payload = {
                 "role": message.role,
                 "content": message.content,
@@ -512,7 +631,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                 user_query = processed_text[:500]
                 media_description = media_desc
                 if media_desc:
-                    print(f"[Media] Processed: {media_desc[:80]}...")
+                    _safe_log("[Media] Processed attached content for routing")
                     # IMPORTANT: Replace the message content with processed text
                     # so LLM sees the image description instead of [media attached: ...]
                     messages[last_user_idx]["content"] = processed_text
@@ -522,19 +641,14 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
         if not user_query:
             user_query = "general query"
 
-        # Select model
-        available_models = list(config.llms.keys())
-        if request.model == "auto" or request.model not in available_models:
-            selected_model = await router.select_model(user_query, user=request.user)
-            # ASCII-only log to avoid Windows GBK UnicodeEncodeError.
-            # print(f"[Router] Query: '{user_query[:50]}...' -> {selected_model}")
-            print(f"[Router] Query: '{user_query}' -> {selected_model}")
-        else:
-            selected_model = request.model
-            print(f"[Specified] Query: '{user_query}' -> {selected_model}")
+        selected_model, session_key, _ = await choose_request_model(
+            payload,
+            messages,
+            http_request.headers.get(config.session_routing.trusted_session_header),
+        )
 
         # Handle streaming
-        if request.stream:
+        if payload.stream:
             async def generate():
                 prefix_sent = False
                 content_buffer = ""
@@ -563,11 +677,11 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                     prefix_disabled = False
 
                     stream_gen = await backend.call(
-                        selected_model, messages, request.max_tokens,
-                        request.temperature, stream=True,
-                        tools=request.tools,
-                        tool_choice=request.tool_choice,
-                        stream_options=request.stream_options,
+                        selected_model, messages, payload.max_tokens,
+                        payload.temperature, stream=True,
+                        tools=payload.tools,
+                        tool_choice=payload.tool_choice,
+                        stream_options=payload.stream_options,
                     )
                     async for chunk in stream_gen:
                         if not config.show_model_prefix:
@@ -658,17 +772,24 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                             except:
                                 yield chunk
                 except Exception as e:
-                    print(f"[Stream Error] {type(e).__name__}: {e}")
+                    if route_cache and config.session_routing.rejudge_on_backend_error:
+                        route_cache.invalidate(session_key)
+                    _safe_log(f"[Stream Error] type={type(e).__name__} session={(session_key or '')[:12]}")
                     yield f'data: {json.dumps({"error": str(e)})}\n\n'
 
             return StreamingResponse(generate(), media_type="text/event-stream")
 
         else:
-            result = await backend.call(
-                selected_model, messages, request.max_tokens,
-                request.temperature, stream=False,
-                tools=request.tools, tool_choice=request.tool_choice
-            )
+            try:
+                result = await backend.call(
+                    selected_model, messages, payload.max_tokens,
+                    payload.temperature, stream=False,
+                    tools=payload.tools, tool_choice=payload.tool_choice
+                )
+            except Exception:
+                if route_cache and config.session_routing.rejudge_on_backend_error:
+                    route_cache.invalidate(session_key)
+                raise
 
             # Add model prefix
             if config.show_model_prefix and result.get("choices"):
@@ -707,12 +828,27 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
     @app.websocket("/v1/chat/ws")
     async def chat_websocket(websocket: WebSocket):
         """WebSocket endpoint for real-time streaming"""
+        if not _authorized(
+            websocket.headers.get("authorization"), config.security.inbound_api_key
+        ):
+            await websocket.close(code=4401, reason="Invalid API key")
+            return
         await websocket.accept()
+        session_key = None
         try:
             # Receive request
             data = await websocket.receive_json()
-            request = ChatRequest(**data)
-            messages = [{"role": m.role, "content": m.content} for m in request.messages]
+            payload = ChatRequest(**data)
+            messages = []
+            for message in payload.messages:
+                item = {"role": message.role, "content": message.content}
+                if message.tool_calls is not None:
+                    item["tool_calls"] = message.tool_calls
+                if message.tool_call_id is not None:
+                    item["tool_call_id"] = message.tool_call_id
+                if message.function_call is not None:
+                    item["function_call"] = message.function_call
+                messages.append(item)
 
             # Extract user query for routing
             user_query = ""
@@ -737,13 +873,11 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
             if not user_query:
                 user_query = "general query"
 
-            # Select model
-            available_models = list(config.llms.keys())
-            if request.model == "auto" or request.model not in available_models:
-                selected_model = await router.select_model(user_query, user=request.user)
-                _safe_log(f"[WS Router] Query: '{user_query[:50]}...' -> {selected_model}")
-            else:
-                selected_model = request.model
+            selected_model, session_key, _ = await choose_request_model(
+                payload,
+                messages,
+                websocket.headers.get(config.session_routing.trusted_session_header),
+            )
 
             # Call LLM backend in streaming mode
             prefix_sent = False
@@ -751,10 +885,12 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
             buffered_chunks = []
 
             stream_gen = await backend.call(
-                selected_model, messages, request.max_tokens,
-                request.temperature,
+                selected_model, messages, payload.max_tokens,
+                payload.temperature,
                 stream=True,
-                stream_options=request.stream_options,
+                tools=payload.tools,
+                tool_choice=payload.tool_choice,
+                stream_options=payload.stream_options,
             )
 
             async for chunk in stream_gen:
@@ -825,6 +961,8 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
         except WebSocketDisconnect:
             _safe_log("[WS] Client disconnected")
         except Exception as e:
+            if route_cache and config.session_routing.rejudge_on_backend_error:
+                route_cache.invalidate(session_key)
             _safe_log(f"[WS Error] {type(e).__name__}: {e}")
             try:
                 await websocket.send_json({"error": str(e)})

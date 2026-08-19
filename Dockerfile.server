@@ -1,0 +1,31 @@
+# syntax=docker/dockerfile:1.7
+
+FROM python:3.11-slim AS runtime
+
+ARG LLMROUTER_COMMIT_SHA=unknown
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    LLMROUTER_COMMIT_SHA=${LLMROUTER_COMMIT_SHA}
+
+WORKDIR /app
+
+RUN addgroup --system --gid 10001 llmrouter \
+    && adduser --system --uid 10001 --ingroup llmrouter --home /app llmrouter
+
+COPY requirements-server.txt ./
+RUN pip install --no-cache-dir -r requirements-server.txt
+
+COPY pyproject.toml README.md LICENSE ./
+COPY openclaw_router ./openclaw_router
+RUN pip install --no-cache-dir --no-deps . \
+    && chown -R llmrouter:llmrouter /app
+
+USER llmrouter
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
+
+CMD ["python", "-m", "openclaw_router", "--config", "/config/config.yaml", "--host", "0.0.0.0", "--port", "8000", "--no-prefix"]
