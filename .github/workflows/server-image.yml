@@ -41,7 +41,9 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-server.txt
       - name: Install server test dependencies
-        run: pip install -r requirements-server.txt pytest
+        run: |
+          pip install -r requirements-server.txt pytest
+          pip install --no-deps .
       - name: Compile server package
         run: python -m compileall -q openclaw_router
       - name: Run server tests
