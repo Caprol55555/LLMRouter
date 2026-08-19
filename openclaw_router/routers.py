@@ -209,6 +209,7 @@ Return only JSON: {{"model":"one-allowed-name"}}"""
                 ],
                 "max_tokens": router.judge_max_tokens,
                 "temperature": 0,
+                "stream": False,
             }
 
             response = await client.post(

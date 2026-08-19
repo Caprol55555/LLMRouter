@@ -34,6 +34,7 @@ class RouterAwareAsyncClient:
     judge_calls = 0
     backend_calls = 0
     judge_model = "glm"
+    judge_payloads = []
 
     def __init__(self, *args, **kwargs):
         pass
@@ -47,6 +48,7 @@ class RouterAwareAsyncClient:
     async def post(self, url, headers=None, json=None, timeout=None):
         if json["model"] == "judge-deepseek":
             type(self).judge_calls += 1
+            type(self).judge_payloads.append(json)
             return FakeResponse(
                 payload={
                     "choices": [
@@ -115,6 +117,7 @@ class SessionAwareServerTests(unittest.TestCase):
         RouterAwareAsyncClient.judge_calls = 0
         RouterAwareAsyncClient.backend_calls = 0
         RouterAwareAsyncClient.judge_model = "glm"
+        RouterAwareAsyncClient.judge_payloads = []
 
     def _client(self, **kwargs):
         return TestClient(create_app(config=build_config(**kwargs)))
@@ -172,6 +175,7 @@ class SessionAwareServerTests(unittest.TestCase):
 
         self.assertEqual(RouterAwareAsyncClient.judge_calls, 2)
         self.assertEqual(RouterAwareAsyncClient.backend_calls, 4)
+        self.assertTrue(all(payload["stream"] is False for payload in RouterAwareAsyncClient.judge_payloads))
 
     def test_auto_once_and_explicit_model_bypass_repeated_judging(self):
         client = self._client(interval=1)
