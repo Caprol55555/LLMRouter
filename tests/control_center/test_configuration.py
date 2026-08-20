@@ -343,7 +343,8 @@ def test_route_lab_uses_ephemeral_admin_test_and_does_not_persist_text(
     monkeypatch.setenv("LLMROUTER_ADMIN_TOKEN", "admin-secret")
     config = build_config(temp_data_dir)
     config.router.strategy = "random"
-    with TestClient(create_app(config=config)) as client:
+    app = create_app(config=config)
+    with TestClient(app) as client:
         csrf = login(client)
         response = client.post(
             "/admin/api/route-lab/evaluate",
@@ -354,6 +355,10 @@ def test_route_lab_uses_ephemeral_admin_test_and_does_not_persist_text(
         payload = response.json()["result"]
         assert payload["traffic_class"] == "admin_test"
         assert payload["persisted"] is False
+        assert app.state.control_center.telemetry.flush(timeout=2.0)
+        admin_events = app.state.control_center.queries.list_events(traffic_class="admin_test")
+        assert admin_events
+        assert all(item["traffic_class"] == "admin_test" for item in admin_events)
         audit = client.get("/admin/api/audit", headers=ORIGIN)
         assert "temporary route lab input" not in audit.text
 

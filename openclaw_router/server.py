@@ -800,6 +800,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
         event_kind: str,
         transport: str,
         requested_model: str,
+        traffic_class: str = "production",
         **values: Any,
     ) -> bool:
         if control_center.telemetry is None:
@@ -810,7 +811,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                 RoutingEvent.create(
                     request_id=request_id,
                     event_kind=event_kind,
-                    traffic_class="production",
+                    traffic_class=traffic_class,
                     transport=transport,
                     requested_model=requested_model,
                     **values,
@@ -1611,6 +1612,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                 event_kind="request_started",
                 transport="http",
                 requested_model="auto",
+                traffic_class="admin_test",
                 route_policy="route_lab",
                 config_version_id=candidate.version_id,
             )
@@ -1622,6 +1624,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                 event_kind="request_completed",
                 transport="http",
                 requested_model="auto",
+                traffic_class="admin_test",
                 route_policy="route_lab",
                 judge_status=outcome.status if outcome else "not_called",
                 selected_model=decision.selected_model,
