@@ -20,6 +20,10 @@ Do not expose backup paths, Docker sockets, shell commands, or arbitrary file
 writes through the admin UI. The application only provides read-only integrity
 checks; backup transport and retention remain an operator responsibility.
 
+CI also builds the server image and runs a read-only-root smoke with `/data`
+mounted writable. That smoke checks `/health`, database creation, and that the
+runtime image cannot import `torch`, `transformers`, or `gradio`.
+
 ## Failure recovery
 
 - If Control Center initialization fails, inference endpoints remain available

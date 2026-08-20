@@ -94,3 +94,55 @@ jobs:
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
+
+  container-smoke:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build local runtime image
+        run: docker build --file Dockerfile.server --tag llmrouter:ci .
+      - name: Run read-only root filesystem smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          config_dir="$RUNNER_TEMP/llmrouter-config"
+          data_dir="$RUNNER_TEMP/llmrouter-data"
+          mkdir -p "$config_dir" "$data_dir"
+          cat > "$config_dir/config.yaml" <<'YAML'
+          serve:
+            host: 0.0.0.0
+            port: 8000
+          router:
+            strategy: random
+          llms:
+            local:
+              provider: local
+              model: local-model
+              base_url: http://127.0.0.1:9/v1
+              auth_mode: none
+          control_center:
+            enabled: true
+            data_dir: /data
+          YAML
+          container_id="$(docker run -d --read-only --tmpfs /tmp --tmpfs /run \
+            --mount "type=bind,src=$config_dir,dst=/config,readonly" \
+            --mount "type=bind,src=$data_dir,dst=/data" \
+            --env LLMROUTER_ADMIN_TOKEN=ci-admin-token \
+            --publish 18000:8000 llmrouter:ci)"
+          cleanup() { docker rm -f "$container_id" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18000/health >/tmp/health.json; then
+              break
+            fi
+            sleep 1
+          done
+          test -s /tmp/health.json
+          grep -q '"status":"ok"' /tmp/health.json
+          test -f "$data_dir/control-center.db"
+          test -s "$data_dir/control-center.db"
+      - name: Verify runtime dependency boundary
+        run: |
+          docker run --rm --entrypoint python llmrouter:ci -c \
+            "import importlib.util; forbidden = ['torch', 'transformers', 'gradio']; assert not [name for name in forbidden if importlib.util.find_spec(name)], forbidden"
