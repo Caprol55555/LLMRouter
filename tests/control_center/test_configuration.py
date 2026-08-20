@@ -358,6 +358,18 @@ def test_route_lab_uses_ephemeral_admin_test_and_does_not_persist_text(
     assert "temporary route lab input" not in audit.text
 
 
+def test_maintenance_integrity_report_is_read_only_and_healthy(
+    temp_data_dir: Path, monkeypatch
+):
+    monkeypatch.setenv("LLMROUTER_ADMIN_TOKEN", "admin-secret")
+    client = TestClient(create_app(config=build_config(temp_data_dir)))
+    login(client)
+    report = client.get("/admin/api/maintenance/integrity", headers=ORIGIN)
+    assert report.status_code == 200, report.text
+    assert report.json()["status"] == "ok"
+    assert report.json()["foreign_key_violations"] == []
+
+
 def test_configuration_api_requires_session_origin_and_csrf(temp_data_dir: Path, monkeypatch):
     monkeypatch.setenv("LLMROUTER_ADMIN_TOKEN", "admin-secret")
     config = build_config(temp_data_dir)

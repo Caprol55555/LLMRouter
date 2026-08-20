@@ -52,6 +52,7 @@ try:
     from .control_center.runtime import ControlCenterRuntime
     from .control_center.status import admin_api_status
     from .control_center.telemetry import RoutingEvent
+    from .control_center.maintenance import integrity_report
     from .control_center.configuration import (
         ConfigurationConflict,
         ConfigurationError,
@@ -76,6 +77,7 @@ except ImportError:
     from control_center.runtime import ControlCenterRuntime
     from control_center.status import admin_api_status
     from control_center.telemetry import RoutingEvent
+    from control_center.maintenance import integrity_report
     from control_center.configuration import (
         ConfigurationConflict,
         ConfigurationError,
@@ -1365,6 +1367,16 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
             configuration_service().list_audit(page=page, page_size=page_size),
             headers={"Cache-Control": "no-store"},
         )
+
+    @protected_admin.get("/maintenance/integrity", include_in_schema=False)
+    async def admin_integrity():
+        report = integrity_report(control_center.config.db_path)
+        record_admin_audit(
+            "integrity_check",
+            "success" if report["status"] == "ok" else "failure",
+            summary={"status": report["status"]},
+        )
+        return JSONResponse(report, headers={"Cache-Control": "no-store"})
 
     @protected_admin_write.post("/configuration/drafts", include_in_schema=False)
     async def create_configuration_draft(request: Request):
