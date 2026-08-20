@@ -1,6 +1,6 @@
 # LLMRouter Control Center Architecture Boundaries
 
-> Phase: 0 (baseline lock and control-plane skeleton)  
+> Phase: 0–1 (control-plane skeleton and routing telemetry)
 > Date: 2026-08-20
 
 ## Purpose
@@ -41,12 +41,14 @@ openclaw_router.config.OpenClawConfig / ControlCenterConfig
 Rules:
 
 - `routers.py`, `session_routing.py`, and the LLM backend must not import from
-  `control_center`.
+  `control_center`; they expose generic routing detail/observer hooks only.
 - `control_center` may import configuration dataclasses and the Python standard
   library only.
-- `server.py` only registers `app.state.control_center` and wires the
-  `/admin/api/status` route.
-- The SQLite database is never accessed on the inference hot path in this phase.
+- `server.py` owns the thin integration: it registers
+  `app.state.control_center`, wires `/admin/api/status`, and submits narrow
+  structured events through a non-blocking callback.
+- The inference hot path never opens, queries, or waits for SQLite. Its only
+  telemetry operation is bounded in-memory `put_nowait`.
 
 ## Default-off guarantee
 
@@ -101,12 +103,12 @@ Three states:
 The response never contains the database path, configuration body, secrets, or
 raw exceptions.
 
-## What is intentionally absent in phase 0
+## What is intentionally absent through phase 1
 
-No UI, login, token, cookie, CSRF, CORS, telemetry, metrics, config drafts,
-snapshots, diff, publish, hot update, rollback, `RuntimeSnapshot`, Route Lab,
-A/B testing, test sets, 9router `/v1/models` calls, or phase 1–5 business
-tables.
+No UI, login, token, cookie, CSRF, CORS, management telemetry HTTP API, config
+drafts, snapshots, diff, publish, hot update, rollback, `RuntimeSnapshot`,
+Route Lab, A/B testing, test sets, 9router `/v1/models` calls, or phase 2–5
+business tables.
 
 ## Migration rules
 
@@ -140,8 +142,10 @@ tables.
   max version). No unknown record is modified or deleted, the runtime enters
   DEGRADED, and `/admin/api/status` returns 503 with `schema_version: null`.
 
-## Extension contract for later phases
+## Phase 1 telemetry extension
 
-Later phases may add business tables and a single SQLite writer worker, but they
-must keep SQLite out of the request hot path. Telemetry may be enqueued in
-memory and flushed asynchronously; it must never block `/v1/*` responses.
+Phase 1 adds `routing_events`, `routing_aggregates_hourly`, a bounded queue, and
+a single SQLite writer. Queue full, SQLite failures, and shutdown timeout only
+degrade observability. They never fail `/v1/*`. The read-only query service is
+internal and has no HTTP route until phase 2. See
+`docs/control-center-telemetry.md` for event and retention contracts.

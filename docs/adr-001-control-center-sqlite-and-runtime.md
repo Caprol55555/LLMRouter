@@ -27,7 +27,8 @@ Use Python standard library `sqlite3` with a single file at
 - `requirements-server.txt` intentionally stays small and free of ORMs.
 - No Alembic/SQLAlchemy/aiosqlite keeps the production image minimal.
 - Synchronous `sqlite3` is acceptable because Control Center I/O is off the
-  inference hot path in phase 0.
+  inference hot path. Phase 1 confines writes to one background worker and
+  opens query connections in SQLite read-only/query-only mode.
 
 ## Configuration
 
@@ -118,6 +119,7 @@ running against an incompatible newer schema.
 - `state`: `DISABLED`, `OK`, or `DEGRADED`
 - `schema_version`: current schema version when OK, otherwise `None`
 - `last_error`: sanitized error message
+- phase 1 telemetry writer and read-only query service references when healthy
 
 Initialization is failure-isolated: an exception during migration is caught, the
 state is set to `DEGRADED`, and the main FastAPI application continues to serve
@@ -130,6 +132,10 @@ state is set to `DEGRADED`, and the main FastAPI application continues to serve
 - All `/admin/api/status` responses include `Cache-Control: no-store`.
 - Logs only expose the exception class name, not message or traceback.
 - No secrets are stored or required in phase 0.
+- Phase 1 routing events contain only bounded structural labels, timings,
+  counters, token usage reported by upstream, and a short prefix of an already
+  SHA-256-derived session key. Prompt/message/tool content, headers, cookies,
+  API keys, and exception messages are excluded.
 
 ## Read-only root filesystem
 
@@ -144,9 +150,9 @@ state is set to `DEGRADED`, and the main FastAPI application continues to serve
 
 - Positive: minimal dependency footprint, small image, simple migration model.
 - Positive: phase 0 behavior is fully isolated from inference.
-- Negative: future high-volume telemetry may require asynchronous batch writes
-  and retention limits to avoid contention; this is acceptable because phase 1
-  already plans a bounded in-memory queue and single writer worker.
+- Negative: telemetry can be dropped during overload or database failure. This
+  is deliberate: phase 1 uses a bounded in-memory queue, a single batch writer,
+  retention limits, and explicit dropped/error counters to protect inference.
 
 ## Alternatives considered
 

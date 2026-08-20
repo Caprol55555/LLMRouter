@@ -44,6 +44,11 @@ media:
 control_center:
   enabled: false
   data_dir: /data
+  telemetry_queue_capacity: 2048
+  telemetry_batch_size: 100
+  telemetry_flush_interval_seconds: 1.0
+  telemetry_retention_days: 7
+  telemetry_aggregate_retention_days: 90
 
 api_keys:
   nine_router: ${NINE_ROUTER_INTERNAL_API_KEY}

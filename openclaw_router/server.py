@@ -15,7 +15,11 @@ import hmac
 import os
 import re
 import sys
-from typing import AsyncGenerator, Optional, Dict, Any, List
+import time
+import uuid
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from typing import AsyncGenerator, Callable, Optional, Dict, Any, List
 
 # Check dependencies
 try:
@@ -31,7 +35,7 @@ except ImportError:
 # Handle both relative and direct imports
 try:
     from .config import OpenClawConfig, LLMConfig, MODELS_WITHOUT_SYSTEM_ROLE, MODEL_CONTEXT_LIMITS
-    from .routers import OpenClawRouter, _safe_log
+    from .routers import JudgeOutcome, OpenClawRouter, _safe_log
     from .media import process_multimodal_content, MediaConfig
     from .session_routing import (
         SessionRouteCache,
@@ -42,9 +46,10 @@ try:
     )
     from .control_center.runtime import ControlCenterRuntime
     from .control_center.status import admin_api_status
+    from .control_center.telemetry import RoutingEvent
 except ImportError:
     from config import OpenClawConfig, LLMConfig, MODELS_WITHOUT_SYSTEM_ROLE, MODEL_CONTEXT_LIMITS
-    from routers import OpenClawRouter, _safe_log
+    from routers import JudgeOutcome, OpenClawRouter, _safe_log
     from media import process_multimodal_content, MediaConfig
     from session_routing import (
         SessionRouteCache,
@@ -55,6 +60,7 @@ except ImportError:
     )
     from control_center.runtime import ControlCenterRuntime
     from control_center.status import admin_api_status
+    from control_center.telemetry import RoutingEvent
 
 
 # ============================================================
@@ -79,6 +85,53 @@ class ChatRequest(BaseModel):
     tools: Optional[List[Dict[str, Any]]] = None
     tool_choice: Optional[Any] = None
     stream_options: Optional[Dict[str, Any]] = None
+
+
+@dataclass(frozen=True)
+class RoutingDecision:
+    selected_model: str
+    session_key: Optional[str]
+    cache_status: str
+    rejudge_reason: Optional[str]
+    judge_outcome: Optional[JudgeOutcome]
+
+
+def _safe_token_count(value: Any) -> Optional[int]:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _usage_token_counts(usage: Any) -> Dict[str, Optional[int]]:
+    if not isinstance(usage, dict):
+        usage = {}
+    return {
+        "prompt_tokens": _safe_token_count(usage.get("prompt_tokens")),
+        "completion_tokens": _safe_token_count(usage.get("completion_tokens")),
+        "total_tokens": _safe_token_count(usage.get("total_tokens")),
+    }
+
+
+def _stream_usage(chunk: str) -> Optional[Dict[str, Optional[int]]]:
+    if "[DONE]" in chunk:
+        return None
+    try:
+        json_text = chunk[6:] if chunk.startswith("data: ") else chunk
+        payload = json.loads(json_text.strip())
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    if not isinstance(usage, dict):
+        return None
+    return _usage_token_counts(usage)
+
+
+def _error_category(error: BaseException) -> str:
+    if isinstance(error, HTTPException):
+        return f"http_{error.status_code}"
+    if isinstance(error, WebSocketDisconnect):
+        return "client_disconnect"
+    return type(error).__name__[:128]
 
 
 # ============================================================
@@ -495,10 +548,18 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
     elif config is None:
         config = OpenClawConfig()
 
+    @asynccontextmanager
+    async def lifespan(application: FastAPI):
+        yield
+        runtime = getattr(application.state, "control_center", None)
+        if runtime is not None:
+            runtime.shutdown(timeout=2.0)
+
     app = FastAPI(
         title="OpenClaw Router",
         description="OpenAI-compatible API with intelligent LLM routing",
-        version="1.0.0"
+        version="1.0.0",
+        lifespan=lifespan,
     )
 
     # Initialize components
@@ -519,6 +580,39 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
     control_center.initialize()
     app.state.control_center = control_center
 
+    def emit_routing_event(
+        *,
+        request_id: str,
+        event_kind: str,
+        transport: str,
+        requested_model: str,
+        **values: Any,
+    ) -> bool:
+        if control_center.telemetry is None:
+            return False
+        try:
+            return control_center.record(
+                RoutingEvent.create(
+                    request_id=request_id,
+                    event_kind=event_kind,
+                    traffic_class="production",
+                    transport=transport,
+                    requested_model=requested_model,
+                    **values,
+                )
+            )
+        except Exception:
+            # Event construction and submission are both outside the inference
+            # correctness boundary.
+            return False
+
+    def telemetry_model_label(requested_model: str) -> str:
+        if requested_model in config.llms:
+            return requested_model
+        if parse_auto_policy(requested_model, config.session_routing) is not None:
+            return requested_model
+        return "invalid"
+
     @app.middleware("http")
     async def require_v1_bearer(request: Request, call_next):
         if request.url.path.startswith("/v1/") and not _authorized(
@@ -535,11 +629,18 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
         payload: ChatRequest,
         messages: List[Dict[str, Any]],
         session_header: Optional[str],
-    ):
+        judge_observer: Optional[Callable[[JudgeOutcome], None]] = None,
+    ) -> RoutingDecision:
         available_models = list(config.llms.keys())
         if payload.model in available_models:
             _safe_log(f"[Route] explicit model={payload.model}")
-            return payload.model, None, False
+            return RoutingDecision(
+                selected_model=payload.model,
+                session_key=None,
+                cache_status="not_applicable",
+                rejudge_reason=None,
+                judge_outcome=None,
+            )
 
         policy = parse_auto_policy(payload.model, config.session_routing)
         if policy is None:
@@ -548,10 +649,27 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
         routing_context = build_routing_context(
             messages, config.router.routing_context_chars
         )
+        judge_outcomes: List[JudgeOutcome] = []
+
+        def observe_judge(outcome: JudgeOutcome) -> None:
+            judge_outcomes.append(outcome)
+            if judge_observer is not None:
+                judge_observer(outcome)
+
         if route_cache is None:
-            selected = await router.select_model(routing_context, user=payload.user)
+            selected = await router.select_model(
+                routing_context,
+                user=payload.user,
+                judge_observer=observe_judge,
+            )
             _safe_log(f"[Route] auto model={selected} cache=disabled")
-            return selected, None, False
+            return RoutingDecision(
+                selected_model=selected,
+                session_key=None,
+                cache_status="disabled",
+                rejudge_reason="cache_disabled",
+                judge_outcome=judge_outcomes[-1] if judge_outcomes else None,
+            )
 
         session_key = derive_session_key(
             messages,
@@ -561,19 +679,29 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
         )
         user_turns = count_user_turns(messages)
         modality = detect_modality(messages)
-        selected, cache_hit = await route_cache.get_or_select(
+        selected, cache_hit, rejudge_reason = await route_cache.get_or_select_detailed(
             session_key,
             user_turns=user_turns,
             policy=policy,
             modality=modality,
             allowed_models=available_models,
-            selector=lambda: router.select_model(routing_context, user=payload.user),
+            selector=lambda: router.select_model(
+                routing_context,
+                user=payload.user,
+                judge_observer=observe_judge,
+            ),
         )
         _safe_log(
             f"[Route] session={session_key[:12]} model={selected} "
             f"cache={'hit' if cache_hit else 'miss'} turns={user_turns} policy={policy.model_id}"
         )
-        return selected, session_key, cache_hit
+        return RoutingDecision(
+            selected_model=selected,
+            session_key=session_key,
+            cache_status="hit" if cache_hit else "miss",
+            rejudge_reason=rejudge_reason,
+            judge_outcome=judge_outcomes[-1] if judge_outcomes else None,
+        )
 
     @app.get("/health")
     async def health():
@@ -609,6 +737,68 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
 
     @app.post("/v1/chat/completions")
     async def chat_completions(payload: ChatRequest, http_request: Request):
+        request_id = uuid.uuid4().hex
+        request_started = time.perf_counter()
+        decision: Optional[RoutingDecision] = None
+        completion_recorded = False
+        telemetry_model = telemetry_model_label(payload.model)
+
+        emit_routing_event(
+            request_id=request_id,
+            event_kind="request_started",
+            transport="http",
+            requested_model=telemetry_model,
+            route_policy=telemetry_model,
+        )
+
+        def record_completed(
+            final_status: str,
+            *,
+            error_category: Optional[str] = None,
+            first_byte_latency_ms: Optional[float] = None,
+            usage: Any = None,
+        ) -> None:
+            nonlocal completion_recorded
+            if completion_recorded:
+                return
+            completion_recorded = True
+            outcome = decision.judge_outcome if decision else None
+            usage_counts = _usage_token_counts(usage)
+            emit_routing_event(
+                request_id=request_id,
+                event_kind="request_completed",
+                transport="http",
+                requested_model=telemetry_model,
+                route_policy=telemetry_model,
+                cache_status=decision.cache_status if decision else None,
+                rejudge_reason=decision.rejudge_reason if decision else None,
+                judge_status=outcome.status if outcome else "not_called",
+                selected_model=decision.selected_model if decision else None,
+                final_status=final_status,
+                fallback=outcome.used_default if outcome else False,
+                error_category=error_category,
+                judge_latency_ms=outcome.latency_ms if outcome else None,
+                first_byte_latency_ms=first_byte_latency_ms,
+                total_latency_ms=(time.perf_counter() - request_started) * 1000,
+                session_hash_prefix=(decision.session_key[:12] if decision and decision.session_key else None),
+                **usage_counts,
+            )
+
+        def record_judge(outcome: JudgeOutcome) -> None:
+            if not outcome.called:
+                return
+            emit_routing_event(
+                request_id=request_id,
+                event_kind="judge_completed",
+                transport="http",
+                requested_model=telemetry_model,
+                route_policy=telemetry_model,
+                judge_status=outcome.status,
+                selected_model=outcome.selected_model,
+                fallback=outcome.used_default,
+                judge_latency_ms=outcome.latency_ms,
+            )
+
         messages = []
         for message in payload.messages:
             message_payload = {
@@ -642,9 +832,13 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
             if config.media.enabled:
                 # Use together API key as fallback
                 together_key = config.api_keys.get("together")
-                processed_text, media_desc = await process_multimodal_content(
-                    raw_content, config.media, fallback_key=together_key
-                )
+                try:
+                    processed_text, media_desc = await process_multimodal_content(
+                        raw_content, config.media, fallback_key=together_key
+                    )
+                except Exception as error:
+                    record_completed("error", error_category=_error_category(error))
+                    raise
                 user_query = processed_text[:500]
                 media_description = media_desc
                 if media_desc:
@@ -658,11 +852,19 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
         if not user_query:
             user_query = "general query"
 
-        selected_model, session_key, _ = await choose_request_model(
-            payload,
-            messages,
-            http_request.headers.get(config.session_routing.trusted_session_header),
-        )
+        try:
+            decision = await choose_request_model(
+                payload,
+                messages,
+                http_request.headers.get(config.session_routing.trusted_session_header),
+                judge_observer=record_judge,
+            )
+        except Exception as error:
+            record_completed("error", error_category=_error_category(error))
+            raise
+
+        selected_model = decision.selected_model
+        session_key = decision.session_key
 
         # Handle streaming
         if payload.stream:
@@ -670,6 +872,15 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                 prefix_sent = False
                 content_buffer = ""
                 buffered_chunks = []
+                first_byte_latency_ms: Optional[float] = None
+                latest_usage: Any = None
+                stream_succeeded = False
+                stream_error_category: Optional[str] = None
+
+                def mark_first_byte() -> None:
+                    nonlocal first_byte_latency_ms
+                    if first_byte_latency_ms is None:
+                        first_byte_latency_ms = (time.perf_counter() - request_started) * 1000
 
                 def flush_buffered_prefix() -> Optional[str]:
                     nonlocal prefix_sent, content_buffer, buffered_chunks
@@ -701,12 +912,17 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                         stream_options=payload.stream_options,
                     )
                     async for chunk in stream_gen:
+                        chunk_usage = _stream_usage(chunk)
+                        if chunk_usage is not None:
+                            latest_usage = chunk_usage
                         if not config.show_model_prefix:
+                            mark_first_byte()
                             yield chunk
                             continue
 
                         if prefix_disabled:
                             if "[DONE]" in chunk:
+                                mark_first_byte()
                                 yield chunk
                                 continue
                             try:
@@ -714,10 +930,12 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                                 data = json.loads(json_str.strip())
                                 cleaned = clean_streaming_chunk(data)
                                 if cleaned:
+                                    mark_first_byte()
                                     yield f"data: {json.dumps(cleaned)}\n\n"
                                     continue
                             except:
                                 pass
+                            mark_first_byte()
                             yield chunk
                             continue
 
@@ -727,7 +945,9 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                             if buffered_chunks and not prefix_sent:
                                 flushed_chunk = flush_buffered_prefix()
                                 if flushed_chunk:
+                                    mark_first_byte()
                                     yield flushed_chunk
+                            mark_first_byte()
                             yield chunk
                         else:
                             try:
@@ -740,7 +960,9 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                                         if buffered_chunks and not prefix_sent:
                                             flushed_chunk = flush_buffered_prefix()
                                             if flushed_chunk:
+                                                mark_first_byte()
                                                 yield flushed_chunk
+                                        mark_first_byte()
                                         yield f"data: {json.dumps(cleaned)}\n\n"
                                         continue
 
@@ -756,13 +978,17 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                                                         buffered_data = json.loads(buffered_json.strip())
                                                         buffered_cleaned = clean_streaming_chunk(buffered_data)
                                                         if buffered_cleaned:
+                                                            mark_first_byte()
                                                             yield f"data: {json.dumps(buffered_cleaned)}\n\n"
                                                         else:
+                                                            mark_first_byte()
                                                             yield buffered_chunk
                                                     except:
+                                                        mark_first_byte()
                                                         yield buffered_chunk
-                                                buffered_chunks = []
+                                            buffered_chunks = []
                                             prefix_disabled = True
+                                            mark_first_byte()
                                             yield f"data: {json.dumps(cleaned)}\n\n"
                                             continue
 
@@ -778,21 +1004,42 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                                                 first_data = json.loads(first[6:] if first.startswith("data: ") else first)
                                                 if first_data.get("choices") and first_data["choices"][0].get("delta"):
                                                     first_data["choices"][0]["delta"]["content"] = f"[{selected_model}] " + content_buffer
+                                                    mark_first_byte()
                                                     yield f"data: {json.dumps(first_data)}\n\n"
                                                     prefix_sent = True
                                                     buffered_chunks = []
                                         else:
+                                            mark_first_byte()
                                             yield f"data: {json.dumps(cleaned)}\n\n"
                                     else:
                                         if prefix_sent:
+                                            mark_first_byte()
                                             yield f"data: {json.dumps(cleaned)}\n\n"
                             except:
+                                mark_first_byte()
                                 yield chunk
+                    stream_succeeded = True
                 except Exception as e:
+                    stream_error_category = _error_category(e)
                     if route_cache and config.session_routing.rejudge_on_backend_error:
                         route_cache.invalidate(session_key)
                     _safe_log(f"[Stream Error] type={type(e).__name__} session={(session_key or '')[:12]}")
+                    mark_first_byte()
                     yield f'data: {json.dumps({"error": str(e)})}\n\n'
+                finally:
+                    if stream_succeeded:
+                        record_completed(
+                            "success",
+                            first_byte_latency_ms=first_byte_latency_ms,
+                            usage=latest_usage,
+                        )
+                    else:
+                        record_completed(
+                            "error" if stream_error_category else "disconnected",
+                            error_category=stream_error_category or "client_disconnect",
+                            first_byte_latency_ms=first_byte_latency_ms,
+                            usage=latest_usage,
+                        )
 
             return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -803,9 +1050,10 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                     payload.temperature, stream=False,
                     tools=payload.tools, tool_choice=payload.tool_choice
                 )
-            except Exception:
+            except Exception as error:
                 if route_cache and config.session_routing.rejudge_on_backend_error:
                     route_cache.invalidate(session_key)
+                record_completed("error", error_category=_error_category(error))
                 raise
 
             # Add model prefix
@@ -818,6 +1066,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                     message["content"] = f"[{selected_model}] {content}"
 
             result["model"] = selected_model
+            record_completed("success", usage=result.get("usage"))
             return result
 
     @app.get("/")
@@ -852,10 +1101,87 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
             return
         await websocket.accept()
         session_key = None
+        decision: Optional[RoutingDecision] = None
+        request_id: Optional[str] = None
+        request_started: Optional[float] = None
+        completion_recorded = False
+        latest_usage: Any = None
+        first_byte_latency_ms: Optional[float] = None
+        payload: Optional[ChatRequest] = None
+        telemetry_model = "invalid"
+
+        def mark_ws_first_byte() -> None:
+            nonlocal first_byte_latency_ms
+            if first_byte_latency_ms is None and request_started is not None:
+                first_byte_latency_ms = (time.perf_counter() - request_started) * 1000
+
+        async def send_ws_text(value: str) -> None:
+            mark_ws_first_byte()
+            await websocket.send_text(value)
+
+        async def send_ws_json(value: Any) -> None:
+            mark_ws_first_byte()
+            await websocket.send_json(value)
+
+        def record_ws_completed(
+            final_status: str,
+            *,
+            error_category: Optional[str] = None,
+        ) -> None:
+            nonlocal completion_recorded
+            if completion_recorded or request_id is None or request_started is None or payload is None:
+                return
+            completion_recorded = True
+            outcome = decision.judge_outcome if decision else None
+            emit_routing_event(
+                request_id=request_id,
+                event_kind="request_completed",
+                transport="websocket",
+                requested_model=telemetry_model,
+                route_policy=telemetry_model,
+                cache_status=decision.cache_status if decision else None,
+                rejudge_reason=decision.rejudge_reason if decision else None,
+                judge_status=outcome.status if outcome else "not_called",
+                selected_model=decision.selected_model if decision else None,
+                final_status=final_status,
+                fallback=outcome.used_default if outcome else False,
+                error_category=error_category,
+                judge_latency_ms=outcome.latency_ms if outcome else None,
+                first_byte_latency_ms=first_byte_latency_ms,
+                total_latency_ms=(time.perf_counter() - request_started) * 1000,
+                session_hash_prefix=(decision.session_key[:12] if decision and decision.session_key else None),
+                **_usage_token_counts(latest_usage),
+            )
+
+        def record_ws_judge(outcome: JudgeOutcome) -> None:
+            if not outcome.called or request_id is None or payload is None:
+                return
+            emit_routing_event(
+                request_id=request_id,
+                event_kind="judge_completed",
+                transport="websocket",
+                requested_model=telemetry_model,
+                route_policy=telemetry_model,
+                judge_status=outcome.status,
+                selected_model=outcome.selected_model,
+                fallback=outcome.used_default,
+                judge_latency_ms=outcome.latency_ms,
+            )
+
         try:
             # Receive request
             data = await websocket.receive_json()
             payload = ChatRequest(**data)
+            telemetry_model = telemetry_model_label(payload.model)
+            request_id = uuid.uuid4().hex
+            request_started = time.perf_counter()
+            emit_routing_event(
+                request_id=request_id,
+                event_kind="request_started",
+                transport="websocket",
+                requested_model=telemetry_model,
+                route_policy=telemetry_model,
+            )
             messages = []
             for message in payload.messages:
                 item = {"role": message.role, "content": message.content}
@@ -890,11 +1216,14 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
             if not user_query:
                 user_query = "general query"
 
-            selected_model, session_key, _ = await choose_request_model(
+            decision = await choose_request_model(
                 payload,
                 messages,
                 websocket.headers.get(config.session_routing.trusted_session_header),
+                judge_observer=record_ws_judge,
             )
+            selected_model = decision.selected_model
+            session_key = decision.session_key
 
             # Call LLM backend in streaming mode
             prefix_sent = False
@@ -911,8 +1240,11 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
             )
 
             async for chunk in stream_gen:
+                chunk_usage = _stream_usage(chunk)
+                if chunk_usage is not None:
+                    latest_usage = chunk_usage
                 if not config.show_model_prefix:
-                    await websocket.send_text(chunk)
+                    await send_ws_text(chunk)
                     continue
 
                 if "[DONE]" in chunk:
@@ -923,10 +1255,10 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                             data_chunk = json.loads(first[6:]) if first.startswith("data: ") else {}
                             if data_chunk.get("choices") and data_chunk["choices"][0].get("delta"):
                                 data_chunk["choices"][0]["delta"]["content"] = f"[{selected_model}] " + content_buffer
-                                await websocket.send_text(f"data: {json.dumps(data_chunk)}\n\n")
+                                await send_ws_text(f"data: {json.dumps(data_chunk)}\n\n")
                         except:
                             pass
-                    await websocket.send_text(chunk)
+                    await send_ws_text(chunk)
                 else:
                     try:
                         json_str = chunk[6:] if chunk.startswith("data: ") else chunk
@@ -942,12 +1274,12 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                                         first_data = json.loads(first[6:] if first.startswith("data: ") else first)
                                         if first_data.get("choices") and first_data["choices"][0].get("delta"):
                                             first_data["choices"][0]["delta"]["content"] = f"[{selected_model}] " + content_buffer
-                                            await websocket.send_text(f"data: {json.dumps(first_data)}\n\n")
+                                            await send_ws_text(f"data: {json.dumps(first_data)}\n\n")
                                             prefix_sent = True
                                             buffered_chunks = []
                                     except:
                                         pass
-                                await websocket.send_json(cleaned)
+                                await send_ws_json(cleaned)
                                 continue
 
                             choices = cleaned.get("choices", [])
@@ -964,28 +1296,34 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                                         first_data = json.loads(first[6:] if first.startswith("data: ") else first)
                                         if first_data.get("choices") and first_data["choices"][0].get("delta"):
                                             first_data["choices"][0]["delta"]["content"] = f"[{selected_model}] " + content_buffer
-                                            await websocket.send_text(f"data: {json.dumps(first_data)}\n\n")
+                                            await send_ws_text(f"data: {json.dumps(first_data)}\n\n")
                                             prefix_sent = True
                                             buffered_chunks = []
                                 else:
-                                    await websocket.send_json(cleaned)
+                                    await send_ws_json(cleaned)
                             else:
                                 if prefix_sent:
-                                    await websocket.send_json(cleaned)
+                                    await send_ws_json(cleaned)
                     except:
-                        await websocket.send_text(chunk)
+                        await send_ws_text(chunk)
+
+            record_ws_completed("success")
 
         except WebSocketDisconnect:
             _safe_log("[WS] Client disconnected")
+            record_ws_completed("disconnected", error_category="client_disconnect")
         except Exception as e:
             if route_cache and config.session_routing.rejudge_on_backend_error:
                 route_cache.invalidate(session_key)
-            _safe_log(f"[WS Error] {type(e).__name__}: {e}")
+            _safe_log(f"[WS Error] type={type(e).__name__}")
+            record_ws_completed("error", error_category=_error_category(e))
             try:
-                await websocket.send_json({"error": str(e)})
+                await send_ws_json({"error": str(e)})
             except:
                 pass
         finally:
+            if request_id is not None and not completion_recorded:
+                record_ws_completed("disconnected", error_category="client_disconnect")
             try:
                 await websocket.close()
             except:

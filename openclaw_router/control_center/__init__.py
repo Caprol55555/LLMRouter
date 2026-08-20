@@ -5,5 +5,11 @@ This module is only initialized when `control_center.enabled` is true.
 """
 
 from .runtime import ControlCenterRuntime, ControlCenterState
+from .telemetry import RoutingEvent, TelemetryService
 
-__all__ = ["ControlCenterRuntime", "ControlCenterState"]
+__all__ = [
+    "ControlCenterRuntime",
+    "ControlCenterState",
+    "RoutingEvent",
+    "TelemetryService",
+]

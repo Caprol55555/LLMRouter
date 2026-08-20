@@ -33,6 +33,11 @@ def test_config_defaults_disable_control_center():
     assert config.control_center.enabled is False
     assert config.control_center.data_dir == "/data"
     assert config.control_center.db_path == "/data/control-center.db"
+    assert config.control_center.telemetry_queue_capacity == 2048
+    assert config.control_center.telemetry_batch_size == 100
+    assert config.control_center.telemetry_flush_interval_seconds == 1.0
+    assert config.control_center.telemetry_retention_days == 7
+    assert config.control_center.telemetry_aggregate_retention_days == 90
 
 
 def test_db_filename_is_constant():
@@ -69,13 +74,25 @@ def test_yaml_parses_enabled_and_absolute_data_dir():
     with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
         f.write(
             "serve:\n  host: 0.0.0.0\n  port: 8000\n"
-            "control_center:\n  enabled: true\n  data_dir: /var/lib/llmrouter\n"
+            "control_center:\n"
+            "  enabled: true\n"
+            "  data_dir: /var/lib/llmrouter\n"
+            "  telemetry_queue_capacity: 512\n"
+            "  telemetry_batch_size: 32\n"
+            "  telemetry_flush_interval_seconds: 0.25\n"
+            "  telemetry_retention_days: 14\n"
+            "  telemetry_aggregate_retention_days: 120\n"
         )
         path = f.name
     try:
         config = OpenClawConfig.from_yaml(path)
         assert config.control_center.enabled is True
         assert config.control_center.data_dir == "/var/lib/llmrouter"
+        assert config.control_center.telemetry_queue_capacity == 512
+        assert config.control_center.telemetry_batch_size == 32
+        assert config.control_center.telemetry_flush_interval_seconds == 0.25
+        assert config.control_center.telemetry_retention_days == 14
+        assert config.control_center.telemetry_aggregate_retention_days == 120
     finally:
         os.unlink(path)
 
@@ -132,13 +149,17 @@ def test_migration_first_run_succeeds(migrated_database: Path):
     try:
         cursor = conn.cursor()
         cursor.execute("PRAGMA user_version")
-        cursor.execute("SELECT version, name, checksum, applied_at FROM schema_migrations")
+        cursor.execute(
+            "SELECT version, name, checksum, applied_at "
+            "FROM schema_migrations ORDER BY version"
+        )
         rows = cursor.fetchall()
-        assert len(rows) == 1
+        assert len(rows) == len(MIGRATIONS)
         assert rows[0][0] == 0
         assert rows[0][1] == "create_schema_migrations_table"
         assert rows[0][2]
         assert rows[0][3]
+        assert rows[-1][0] == max(migration.version for migration in MIGRATIONS)
     finally:
         db.close()
 
@@ -151,14 +172,14 @@ def test_migration_is_idempotent(migrated_database: Path):
     try:
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM schema_migrations")
-        assert cursor.fetchone()[0] == 1
+        assert cursor.fetchone()[0] == len(MIGRATIONS)
     finally:
         db.close()
 
 
 def test_schema_version_matches(migrated_database: Path):
     version = migrations.get_schema_version(str(migrated_database))
-    assert version == 0
+    assert version == max(migration.version for migration in MIGRATIONS)
 
 
 def test_pragmas_are_applied(migrated_database: Path):
@@ -550,7 +571,9 @@ def test_healthy_status_returns_200_and_no_store(temp_data_dir: Path):
     assert body["status"] == "ok"
     assert body["enabled"] is True
     assert body["database"]["status"] == "ok"
-    assert body["database"]["schema_version"] == 0
+    assert body["database"]["schema_version"] == max(
+        migration.version for migration in MIGRATIONS
+    )
     assert body["commit"] == os.getenv("LLMROUTER_COMMIT_SHA", "unknown")
 
 

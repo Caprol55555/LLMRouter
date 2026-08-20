@@ -267,3 +267,77 @@ MIGRATIONS.append(
         statements=(MIGRATIONS_DDL,),
     )
 )
+
+
+MIGRATIONS.append(
+    Migration(
+        version=1,
+        name="create_privacy_safe_routing_telemetry",
+        statements=(
+            """
+            CREATE TABLE routing_events (
+                event_id TEXT PRIMARY KEY,
+                request_id TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                event_kind TEXT NOT NULL CHECK (
+                    event_kind IN ('request_started', 'judge_completed', 'request_completed')
+                ),
+                traffic_class TEXT NOT NULL CHECK (
+                    traffic_class IN ('production', 'admin_test', 'deployment_smoke')
+                ),
+                transport TEXT NOT NULL CHECK (transport IN ('http', 'websocket')),
+                requested_model TEXT NOT NULL,
+                route_policy TEXT,
+                cache_status TEXT,
+                rejudge_reason TEXT,
+                judge_status TEXT,
+                selected_model TEXT,
+                final_status TEXT,
+                fallback INTEGER NOT NULL DEFAULT 0 CHECK (fallback IN (0, 1)),
+                error_category TEXT,
+                judge_latency_ms REAL,
+                first_byte_latency_ms REAL,
+                total_latency_ms REAL,
+                prompt_tokens INTEGER,
+                completion_tokens INTEGER,
+                total_tokens INTEGER,
+                config_version_id INTEGER,
+                session_hash_prefix TEXT
+            )
+            """,
+            "CREATE INDEX idx_routing_events_request ON routing_events(request_id, occurred_at)",
+            "CREATE INDEX idx_routing_events_time ON routing_events(occurred_at)",
+            "CREATE INDEX idx_routing_events_model ON routing_events(selected_model, occurred_at)",
+            """
+            CREATE TABLE routing_aggregates_hourly (
+                bucket_start TEXT NOT NULL,
+                traffic_class TEXT NOT NULL,
+                requested_model TEXT NOT NULL,
+                selected_model TEXT NOT NULL DEFAULT '',
+                final_status TEXT NOT NULL,
+                request_count INTEGER NOT NULL DEFAULT 0,
+                judge_call_count INTEGER NOT NULL DEFAULT 0,
+                cache_hit_count INTEGER NOT NULL DEFAULT 0,
+                fallback_count INTEGER NOT NULL DEFAULT 0,
+                error_count INTEGER NOT NULL DEFAULT 0,
+                total_latency_sum_ms REAL NOT NULL DEFAULT 0,
+                total_latency_sample_count INTEGER NOT NULL DEFAULT 0,
+                judge_latency_sum_ms REAL NOT NULL DEFAULT 0,
+                judge_latency_sample_count INTEGER NOT NULL DEFAULT 0,
+                prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                completion_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0,
+                token_sample_count INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (
+                    bucket_start,
+                    traffic_class,
+                    requested_model,
+                    selected_model,
+                    final_status
+                )
+            )
+            """,
+            "CREATE INDEX idx_routing_aggregates_hourly_time ON routing_aggregates_hourly(bucket_start)",
+        ),
+    )
+)

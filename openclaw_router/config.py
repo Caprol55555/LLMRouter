@@ -147,6 +147,11 @@ class ControlCenterConfig:
 
     enabled: bool = False
     data_dir: str = "/data"
+    telemetry_queue_capacity: int = 2048
+    telemetry_batch_size: int = 100
+    telemetry_flush_interval_seconds: float = 1.0
+    telemetry_retention_days: int = 7
+    telemetry_aggregate_retention_days: int = 90
 
     @property
     def db_path(self) -> str:
@@ -162,6 +167,22 @@ class ControlCenterConfig:
         final = (resolved / self.DB_FILENAME).resolve()
         if final.parent != resolved:
             raise ValueError("control_center database path must remain inside data_dir")
+        if not 1 <= self.telemetry_queue_capacity <= 100000:
+            raise ValueError("control_center.telemetry_queue_capacity must be between 1 and 100000")
+        if not 1 <= self.telemetry_batch_size <= self.telemetry_queue_capacity:
+            raise ValueError(
+                "control_center.telemetry_batch_size must be between 1 and telemetry_queue_capacity"
+            )
+        if not 0.05 <= self.telemetry_flush_interval_seconds <= 60.0:
+            raise ValueError(
+                "control_center.telemetry_flush_interval_seconds must be between 0.05 and 60"
+            )
+        if not 1 <= self.telemetry_retention_days <= 365:
+            raise ValueError("control_center.telemetry_retention_days must be between 1 and 365")
+        if not self.telemetry_retention_days <= self.telemetry_aggregate_retention_days <= 3650:
+            raise ValueError(
+                "control_center.telemetry_aggregate_retention_days must be between telemetry_retention_days and 3650"
+            )
         # Keep the original value normalized to a string.
         self.data_dir = data_dir
 
@@ -399,6 +420,33 @@ class OpenClawConfig:
         config.control_center = ControlCenterConfig(
             enabled=_parse_bool(control_center_data.get("enabled", default_control_center.enabled), default_control_center.enabled),
             data_dir=str(control_center_data.get("data_dir", default_control_center.data_dir) or default_control_center.data_dir),
+            telemetry_queue_capacity=int(
+                control_center_data.get(
+                    "telemetry_queue_capacity", default_control_center.telemetry_queue_capacity
+                )
+            ),
+            telemetry_batch_size=int(
+                control_center_data.get(
+                    "telemetry_batch_size", default_control_center.telemetry_batch_size
+                )
+            ),
+            telemetry_flush_interval_seconds=float(
+                control_center_data.get(
+                    "telemetry_flush_interval_seconds",
+                    default_control_center.telemetry_flush_interval_seconds,
+                )
+            ),
+            telemetry_retention_days=int(
+                control_center_data.get(
+                    "telemetry_retention_days", default_control_center.telemetry_retention_days
+                )
+            ),
+            telemetry_aggregate_retention_days=int(
+                control_center_data.get(
+                    "telemetry_aggregate_retention_days",
+                    default_control_center.telemetry_aggregate_retention_days,
+                )
+            ),
         )
 
         # LLM configurations

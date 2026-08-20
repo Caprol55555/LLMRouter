@@ -146,16 +146,37 @@ class SessionRouteCache:
         modality: str,
         allowed_models: List[str],
     ) -> bool:
-        if entry.expires_at <= now or entry.model not in allowed_models:
-            return False
+        return self._rejudge_reason(
+            entry,
+            now=now,
+            user_turns=user_turns,
+            policy=policy,
+            modality=modality,
+            allowed_models=allowed_models,
+        ) is None
+
+    def _rejudge_reason(
+        self,
+        entry: SessionRouteEntry,
+        *,
+        now: float,
+        user_turns: int,
+        policy: AutoPolicy,
+        modality: str,
+        allowed_models: List[str],
+    ) -> Optional[str]:
+        if entry.expires_at <= now:
+            return "ttl_expired"
+        if entry.model not in allowed_models:
+            return "model_unavailable"
         if entry.policy_signature != policy.signature:
-            return False
+            return "policy_changed"
         if self.config.rejudge_on_modality_change and entry.modality != modality:
-            return False
+            return "modality_changed"
         interval = policy.rejudge_every_user_turns
         if interval > 0 and user_turns - entry.judged_user_turns >= interval:
-            return False
-        return True
+            return "turn_interval"
+        return None
 
     async def get_or_select(
         self,
@@ -167,20 +188,43 @@ class SessionRouteCache:
         allowed_models: List[str],
         selector: Callable[[], Awaitable[str]],
     ) -> Tuple[str, bool]:
+        selected, cache_hit, _ = await self.get_or_select_detailed(
+            session_key,
+            user_turns=user_turns,
+            policy=policy,
+            modality=modality,
+            allowed_models=allowed_models,
+            selector=selector,
+        )
+        return selected, cache_hit
+
+    async def get_or_select_detailed(
+        self,
+        session_key: str,
+        *,
+        user_turns: int,
+        policy: AutoPolicy,
+        modality: str,
+        allowed_models: List[str],
+        selector: Callable[[], Awaitable[str]],
+    ) -> Tuple[str, bool, Optional[str]]:
         async with self._lock_for(session_key):
             now = self._clock()
             entry = self._entries.get(session_key)
-            if entry and self._can_reuse(
-                entry,
-                now=now,
-                user_turns=user_turns,
-                policy=policy,
-                modality=modality,
-                allowed_models=allowed_models,
-            ):
+            reason = "new_session"
+            if entry:
+                reason = self._rejudge_reason(
+                    entry,
+                    now=now,
+                    user_turns=user_turns,
+                    policy=policy,
+                    modality=modality,
+                    allowed_models=allowed_models,
+                )
+            if entry and reason is None:
                 entry.last_seen = now
                 self._entries.move_to_end(session_key)
-                return entry.model, True
+                return entry.model, True, None
 
             selected = await selector()
             self._entries[session_key] = SessionRouteEntry(
@@ -195,7 +239,7 @@ class SessionRouteCache:
             while len(self._entries) > self.config.max_entries:
                 old_key, _ = self._entries.popitem(last=False)
                 self._locks.pop(old_key, None)
-            return selected, False
+            return selected, False, reason
 
     def invalidate(self, session_key: Optional[str]) -> None:
         if not session_key:
