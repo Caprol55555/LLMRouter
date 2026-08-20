@@ -1,0 +1,147 @@
+# LLMRouter Control Center Architecture Boundaries
+
+> Phase: 0 (baseline lock and control-plane skeleton)  
+> Date: 2026-08-20
+
+## Purpose
+
+This document defines the isolation boundary between the existing LLMRouter
+inference plane (`/v1/*`, `/health`, routing strategies, session routing) and the
+new Control Center management plane.
+
+## Deployment shape
+
+The Control Center lives in the same Python package and the same Docker image as
+the OpenClaw Router. It is **opt-in** via YAML:
+
+```yaml
+control_center:
+  enabled: false
+  data_dir: /data
+```
+
+When disabled, the server behaves exactly as before: no SQLite database, no data
+directory creation, no extra runtime dependencies, no administrator token
+required.
+
+## Dependency direction
+
+```text
+inference plane (server.py, routers.py, session_routing.py, LLMBackend)
+        ^
+        | only thin wiring in server.py
+        v
+control plane (openclaw_router/control_center/)
+        ^
+        | reads config object
+        v
+openclaw_router.config.OpenClawConfig / ControlCenterConfig
+```
+
+Rules:
+
+- `routers.py`, `session_routing.py`, and the LLM backend must not import from
+  `control_center`.
+- `control_center` may import configuration dataclasses and the Python standard
+  library only.
+- `server.py` only registers `app.state.control_center` and wires the
+  `/admin/api/status` route.
+- The SQLite database is never accessed on the inference hot path in this phase.
+
+## Default-off guarantee
+
+When `control_center.enabled` is false or absent:
+
+- No directory or file is created under `data_dir`.
+- `LLMROUTER_ADMIN_TOKEN` is not required.
+- `/health`, `/v1/*`, WebSocket, SSE, tool calls, and session routing semantics
+  are unchanged.
+- The Control Center runtime object is created but performs no I/O.
+
+## Failure isolation
+
+If `control_center.enabled` is true but database initialization or migrations
+fail:
+
+- The main FastAPI application still starts.
+- `/health` and `/v1/*` remain available.
+- `/admin/api/status` returns HTTP 503 with `status: degraded`.
+- The error is logged without exposing absolute paths, SQL, environment
+  variables, or raw exceptions.
+
+## Data directory and read-only root filesystem
+
+- The database filename is fixed to `control-center.db`; it is a class-level
+  constant (`ClassVar[str]`) and cannot be overridden by YAML, the constructor,
+  or dataclass serialization.
+- `db_path` is always `<data_dir>/control-center.db`; it cannot escape
+  `data_dir` through `..` or a custom filename.
+- `data_dir` must be an absolute path; relative paths are rejected at startup.
+- The application root filesystem remains read-only compatible.
+- The Docker image creates `/data` and assigns it to the `llmrouter` user.
+- Enabling Control Center only requires mounting a writable volume at `/data`.
+
+## Status contract
+
+Only one management route exists in phase 0:
+
+- `GET /admin/api/status`
+
+Three states:
+
+1. **Disabled** (`enabled: false`) → HTTP 404, stable error code
+   `control_center_disabled`, `Cache-Control: no-store`, no database created.
+2. **Healthy** (`enabled: true` and DB/migrations OK) → HTTP 200, `status: ok`,
+   `database.status: ok`, current schema version, `LLMROUTER_COMMIT_SHA` or
+   `unknown`, `Cache-Control: no-store`.
+3. **Degraded** (`enabled: true` and DB/migrations failed) → HTTP 503,
+   `status: degraded`, `database.status: unavailable`,
+   `database.schema_version: null`, `Cache-Control: no-store`.
+
+The response never contains the database path, configuration body, secrets, or
+raw exceptions.
+
+## What is intentionally absent in phase 0
+
+No UI, login, token, cookie, CSRF, CORS, telemetry, metrics, config drafts,
+snapshots, diff, publish, hot update, rollback, `RuntimeSnapshot`, Route Lab,
+A/B testing, test sets, 9router `/v1/models` calls, or phase 1–5 business
+tables.
+
+## Migration rules
+
+- Migrations use Python standard library `sqlite3` only.
+- Migrations are declared as `Migration(version: int, name: str, statements:
+  tuple[str, ...])`. Each migration holds one or more complete SQL statements;
+  the runner executes each statement with `cursor.execute`. It never splits a
+  single SQL string on `;`, so string literals containing `;` are safe.
+- `statements` must be a `tuple[str, ...]` — not a list, set, or string. The
+  frozen dataclass rejects non-tuple containers at construction time.
+- Migrations are strictly ordered by integer version. The registry is validated
+  and sorted before any database write; an invalid registry (duplicate version,
+  non-int version, empty name, empty statements, non-tuple statements, missing
+  version 0, etc.) raises a stable `MigrationError` subclass and leaves the
+  database untouched.
+- Version `0` is reserved for bootstrapping the `schema_migrations` tracking
+  table itself.
+- Each migration runs inside a transaction (`BEGIN IMMEDIATE ... COMMIT`).
+  Version 0 creates the tracking table and records itself in the same
+  transaction, so a failure between DDL and the record insert rolls back both.
+- `schema_migrations` records `version`, `name`, `checksum`, and `applied_at`
+  (UTC ISO-8601).
+- Re-running migrations is a stable no-op.
+- Checksum drift of an already-applied migration is rejected.
+- Failed migrations are rolled back and not recorded as successful.
+- The registry must include exactly one version 0 (the bootstrap migration).
+  Missing or duplicate version 0 is rejected before any database or directory
+  write.
+- If the database contains any applied version not present in the current
+  registry, the runner fails closed with `UnknownSchemaError` (not just the
+  max version). No unknown record is modified or deleted, the runtime enters
+  DEGRADED, and `/admin/api/status` returns 503 with `schema_version: null`.
+
+## Extension contract for later phases
+
+Later phases may add business tables and a single SQLite writer worker, but they
+must keep SQLite out of the request hot path. Telemetry may be enqueued in
+memory and flushed asynchronously; it must never block `/v1/*` responses.

@@ -11,7 +11,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN addgroup --system --gid 10001 llmrouter \
-    && adduser --system --uid 10001 --ingroup llmrouter --home /app llmrouter
+    && adduser --system --uid 10001 --ingroup llmrouter --home /app llmrouter \
+    && mkdir -p /data && chown -R llmrouter:llmrouter /data
 
 COPY requirements-server.txt ./
 RUN pip install --no-cache-dir -r requirements-server.txt

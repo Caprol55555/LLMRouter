@@ -40,6 +40,8 @@ try:
         detect_modality,
         parse_auto_policy,
     )
+    from .control_center.runtime import ControlCenterRuntime
+    from .control_center.status import admin_api_status
 except ImportError:
     from config import OpenClawConfig, LLMConfig, MODELS_WITHOUT_SYSTEM_ROLE, MODEL_CONTEXT_LIMITS
     from routers import OpenClawRouter, _safe_log
@@ -51,6 +53,8 @@ except ImportError:
         detect_modality,
         parse_auto_policy,
     )
+    from control_center.runtime import ControlCenterRuntime
+    from control_center.status import admin_api_status
 
 
 # ============================================================
@@ -509,6 +513,12 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
     app.state.backend = backend
     app.state.route_cache = route_cache
 
+    # Initialize Control Center in a failure-isolated way. When disabled, this only
+    # creates a lightweight runtime object and never touches the database or data_dir.
+    control_center = ControlCenterRuntime(config.control_center)
+    control_center.initialize()
+    app.state.control_center = control_center
+
     @app.middleware("http")
     async def require_v1_bearer(request: Request, call_next):
         if request.url.path.startswith("/v1/") and not _authorized(
@@ -574,6 +584,8 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
             "session_cache_entries": route_cache.size if route_cache else 0,
             "commit": os.getenv("LLMROUTER_COMMIT_SHA", "unknown"),
         }
+
+    app.add_api_route("/admin/api/status", admin_api_status, methods=["GET"], include_in_schema=False)
 
     @app.get("/v1/models")
     async def list_models():

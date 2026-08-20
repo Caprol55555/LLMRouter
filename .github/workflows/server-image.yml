@@ -9,6 +9,7 @@ on:
       - 'openclaw_router/**'
       - 'tests/test_openclaw_http_tool_calls.py'
       - 'tests/test_openclaw_session_routing.py'
+      - 'tests/control_center/**'
       - 'requirements-server.txt'
       - 'Dockerfile.server'
       - '.dockerignore'
@@ -19,6 +20,7 @@ on:
       - 'openclaw_router/**'
       - 'tests/test_openclaw_http_tool_calls.py'
       - 'tests/test_openclaw_session_routing.py'
+      - 'tests/control_center/**'
       - 'requirements-server.txt'
       - 'Dockerfile.server'
       - '.dockerignore'
@@ -51,6 +53,7 @@ jobs:
           pytest -q
           tests/test_openclaw_http_tool_calls.py
           tests/test_openclaw_session_routing.py
+          tests/control_center
 
   image:
     if: github.event_name != 'pull_request'

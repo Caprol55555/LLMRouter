@@ -9,7 +9,8 @@ import yaml
 import itertools
 import threading
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
+from pathlib import Path
+from typing import ClassVar, Dict, List, Optional, Any
 
 
 def _parse_bool(value: Any, default: bool = False) -> bool:
@@ -137,6 +138,35 @@ class SecurityConfig:
 
 
 @dataclass
+class ControlCenterConfig:
+    """Control Center configuration. Disabled by default to preserve the existing lightweight mode."""
+
+    # ponytail: DB_FILENAME is a true constant (ClassVar) so it cannot be
+    # overridden by __init__, YAML deserialization, or dataclass metadata.
+    DB_FILENAME: ClassVar[str] = "control-center.db"
+
+    enabled: bool = False
+    data_dir: str = "/data"
+
+    @property
+    def db_path(self) -> str:
+        return (Path(self.data_dir or "/data") / self.DB_FILENAME).as_posix()
+
+    def validate(self) -> None:
+        data_dir = (self.data_dir or "").strip()
+        if not data_dir:
+            raise ValueError("control_center.data_dir must be a non-empty absolute path")
+        if not os.path.isabs(data_dir):
+            raise ValueError(f"control_center.data_dir must be an absolute path: {data_dir}")
+        resolved = Path(data_dir).resolve()
+        final = (resolved / self.DB_FILENAME).resolve()
+        if final.parent != resolved:
+            raise ValueError("control_center database path must remain inside data_dir")
+        # Keep the original value normalized to a string.
+        self.data_dir = data_dir
+
+
+@dataclass
 class MediaConfig:
     """
     Media understanding configuration.
@@ -197,6 +227,9 @@ class OpenClawConfig:
 
     # Media understanding (optional)
     media: MediaConfig = field(default_factory=MediaConfig)
+
+    # Control Center management plane (default disabled)
+    control_center: ControlCenterConfig = field(default_factory=ControlCenterConfig)
 
     # Origin metadata (useful for resolving relative paths)
     config_path: Optional[str] = None
@@ -360,6 +393,14 @@ class OpenClawConfig:
             max_description_chars=int(media_data.get("max_description_chars", default_media.max_description_chars) or default_media.max_description_chars),
         )
 
+        # Control Center settings (default disabled; only validate when present/enabled)
+        control_center_data = data.get("control_center", {}) or {}
+        default_control_center = ControlCenterConfig()
+        config.control_center = ControlCenterConfig(
+            enabled=_parse_bool(control_center_data.get("enabled", default_control_center.enabled), default_control_center.enabled),
+            data_dir=str(control_center_data.get("data_dir", default_control_center.data_dir) or default_control_center.data_dir),
+        )
+
         # LLM configurations
         llms_data = data.get("llms", data.get("models", {}))
         for name, llm_config in llms_data.items():
@@ -386,7 +427,12 @@ class OpenClawConfig:
         return config
 
     def validate(self) -> None:
-        """Fail closed for invalid production routing and recursion-prone models."""
+        """Validate the full configuration, including Control Center when configured."""
+        # Only validate Control Center paths when it is enabled or explicitly configured.
+        # The default disabled state must not create directories or require a data_dir.
+        if self.control_center.enabled:
+            self.control_center.validate()
+        # Fail closed for invalid production routing and recursion-prone models.
         if self.security.require_inbound_auth and not self.security.inbound_api_key:
             raise ValueError(
                 "security.inbound_api_key is required when require_inbound_auth is true"
