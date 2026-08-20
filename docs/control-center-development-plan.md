@@ -662,7 +662,8 @@ P6 chore(control-center): harden production delivery and operations
 - P3 `378b6f4`：配置草稿与版本历史；
 - P4/P5 `86b62c7`：原子激活、回滚、模型发现与 Route Lab。
 
-阶段 6 本地硬化已完成并提交为 `99f5be8`；以下事项需要真实部署环境或用户明确的
+阶段 6 本地硬化已完成并提交为 `99f5be8`，WebSocket smoke/CI 容器验收补齐提交为
+`833375a`、`ddb4bd6`；以下事项需要真实部署环境或用户明确的
 cloud/深圳机授权，当前不在本地仓库内执行：镜像构建与 SBOM 的 CI 实跑、
 深圳机资源/Swap/OOM 灰度、cloud 仓库变更同步。
 
