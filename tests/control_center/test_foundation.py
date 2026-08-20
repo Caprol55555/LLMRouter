@@ -28,6 +28,16 @@ from openclaw_router.control_center.runtime import ControlCenterRuntime, Control
 from openclaw_router.server import create_app
 
 
+def _login_admin(client: TestClient, token: str = "test-admin-token"):
+    response = client.post(
+        "/admin/api/login",
+        headers={"Origin": "http://localhost", "Host": "localhost"},
+        json={"token": token},
+    )
+    assert response.status_code == 200
+    return response
+
+
 def test_config_defaults_disable_control_center():
     config = OpenClawConfig()
     assert config.control_center.enabled is False
@@ -294,7 +304,7 @@ def test_invalid_registry_leaves_no_database(temp_data_dir: Path):
     assert not db_path.exists()
 
 
-def test_future_schema_rejected_and_degraded(temp_data_dir: Path):
+def test_future_schema_rejected_and_degraded(temp_data_dir: Path, monkeypatch):
     """A database with an unknown future version must fail closed."""
     db_path = temp_data_dir / "control-center.db"
     migrate(str(db_path))
@@ -329,11 +339,13 @@ def test_future_schema_rejected_and_degraded(temp_data_dir: Path):
     config = OpenClawConfig()
     config.control_center = ControlCenterConfig(enabled=True, data_dir=str(temp_data_dir))
 
+    monkeypatch.setenv("LLMROUTER_ADMIN_TOKEN", "test-admin-token")
     app = create_app(config=config)
     runtime = app.state.control_center
     assert runtime.state == ControlCenterState.DEGRADED
     assert runtime.schema_version is None
     client = TestClient(app)
+    _login_admin(client)
     response = client.get("/admin/api/status")
     assert response.status_code == 503
     assert response.headers.get("cache-control") == "no-store"
@@ -513,7 +525,7 @@ def test_registry_with_only_version_zero_passes(temp_data_dir: Path):
     assert db_path.exists()
 
 
-def test_unknown_intermediate_version_fails_closed(temp_data_dir: Path):
+def test_unknown_intermediate_version_fails_closed(temp_data_dir: Path, monkeypatch):
     """All unknown applied versions must fail closed, not just the max."""
     db_path = temp_data_dir / "control-center.db"
 
@@ -549,21 +561,25 @@ def test_unknown_intermediate_version_fails_closed(temp_data_dir: Path):
     # Runtime must enter DEGRADED.
     config = OpenClawConfig()
     config.control_center = ControlCenterConfig(enabled=True, data_dir=str(temp_data_dir))
+    monkeypatch.setenv("LLMROUTER_ADMIN_TOKEN", "test-admin-token")
     app = create_app(config=config)
     runtime = app.state.control_center
     assert runtime.state == ControlCenterState.DEGRADED
     assert runtime.schema_version is None
     client = TestClient(app)
+    _login_admin(client)
     response = client.get("/admin/api/status")
     assert response.status_code == 503
     assert response.json()["database"]["schema_version"] is None
 
 
-def test_healthy_status_returns_200_and_no_store(temp_data_dir: Path):
+def test_healthy_status_returns_200_and_no_store(temp_data_dir: Path, monkeypatch):
     config = OpenClawConfig()
     config.control_center = ControlCenterConfig(enabled=True, data_dir=str(temp_data_dir))
+    monkeypatch.setenv("LLMROUTER_ADMIN_TOKEN", "test-admin-token")
     app = create_app(config=config)
     client = TestClient(app)
+    _login_admin(client)
     response = client.get("/admin/api/status")
     assert response.status_code == 200
     assert response.headers.get("cache-control") == "no-store"
@@ -589,9 +605,10 @@ def test_status_response_does_not_expose_paths_or_secrets(temp_data_dir: Path):
     assert "BEGIN" not in text
 
 
-def test_degraded_status_returns_503_and_no_store(temp_data_dir: Path):
+def test_degraded_status_returns_503_and_no_store(temp_data_dir: Path, monkeypatch):
     config = OpenClawConfig()
     config.control_center = ControlCenterConfig(enabled=True, data_dir=str(temp_data_dir))
+    monkeypatch.setenv("LLMROUTER_ADMIN_TOKEN", "test-admin-token")
     runtime = ControlCenterRuntime(config.control_center)
 
     def fail(*args, **kwargs):
@@ -603,6 +620,7 @@ def test_degraded_status_returns_503_and_no_store(temp_data_dir: Path):
     app = create_app(config=config)
     app.state.control_center = runtime
     client = TestClient(app)
+    _login_admin(client)
     response = client.get("/admin/api/status")
     assert response.status_code == 503
     assert response.headers.get("cache-control") == "no-store"

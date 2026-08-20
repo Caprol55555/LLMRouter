@@ -20,3 +20,5 @@ notebooks
 saved_models
 scripts
 tests
+control_center_ui/node_modules
+control_center_ui/dist

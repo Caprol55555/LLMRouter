@@ -1,5 +1,14 @@
 # syntax=docker/dockerfile:1.7
 
+FROM node:24-alpine AS dashboard-builder
+
+WORKDIR /ui
+COPY control_center_ui/package.json control_center_ui/package-lock.json ./
+RUN npm ci --ignore-scripts
+COPY control_center_ui/index.html control_center_ui/tsconfig.json control_center_ui/vite.config.ts ./
+COPY control_center_ui/src ./src
+RUN npm run build
+
 FROM python:3.11-slim AS runtime
 
 ARG LLMROUTER_COMMIT_SHA=unknown
@@ -19,6 +28,7 @@ RUN pip install --no-cache-dir -r requirements-server.txt
 
 COPY pyproject.toml README.md LICENSE ./
 COPY openclaw_router ./openclaw_router
+COPY --from=dashboard-builder /ui/dist ./openclaw_router/control_center/static
 RUN pip install --no-cache-dir --no-deps . \
     && chown -R llmrouter:llmrouter /app
 

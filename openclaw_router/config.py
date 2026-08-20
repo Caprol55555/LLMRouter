@@ -152,6 +152,9 @@ class ControlCenterConfig:
     telemetry_flush_interval_seconds: float = 1.0
     telemetry_retention_days: int = 7
     telemetry_aggregate_retention_days: int = 90
+    admin_session_ttl_seconds: int = 3600
+    admin_login_window_seconds: int = 60
+    admin_login_max_attempts: int = 5
 
     @property
     def db_path(self) -> str:
@@ -182,6 +185,18 @@ class ControlCenterConfig:
         if not self.telemetry_retention_days <= self.telemetry_aggregate_retention_days <= 3650:
             raise ValueError(
                 "control_center.telemetry_aggregate_retention_days must be between telemetry_retention_days and 3650"
+            )
+        if not 300 <= self.admin_session_ttl_seconds <= 86400:
+            raise ValueError(
+                "control_center.admin_session_ttl_seconds must be between 300 and 86400"
+            )
+        if not 10 <= self.admin_login_window_seconds <= 3600:
+            raise ValueError(
+                "control_center.admin_login_window_seconds must be between 10 and 3600"
+            )
+        if not 1 <= self.admin_login_max_attempts <= 100:
+            raise ValueError(
+                "control_center.admin_login_max_attempts must be between 1 and 100"
             )
         # Keep the original value normalized to a string.
         self.data_dir = data_dir
@@ -445,6 +460,24 @@ class OpenClawConfig:
                 control_center_data.get(
                     "telemetry_aggregate_retention_days",
                     default_control_center.telemetry_aggregate_retention_days,
+                )
+            ),
+            admin_session_ttl_seconds=int(
+                control_center_data.get(
+                    "admin_session_ttl_seconds",
+                    default_control_center.admin_session_ttl_seconds,
+                )
+            ),
+            admin_login_window_seconds=int(
+                control_center_data.get(
+                    "admin_login_window_seconds",
+                    default_control_center.admin_login_window_seconds,
+                )
+            ),
+            admin_login_max_attempts=int(
+                control_center_data.get(
+                    "admin_login_max_attempts",
+                    default_control_center.admin_login_max_attempts,
                 )
             ),
         )

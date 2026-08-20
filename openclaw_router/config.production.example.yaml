@@ -49,6 +49,9 @@ control_center:
   telemetry_flush_interval_seconds: 1.0
   telemetry_retention_days: 7
   telemetry_aggregate_retention_days: 90
+  admin_session_ttl_seconds: 3600
+  admin_login_window_seconds: 60
+  admin_login_max_attempts: 5
 
 api_keys:
   nine_router: ${NINE_ROUTER_INTERNAL_API_KEY}

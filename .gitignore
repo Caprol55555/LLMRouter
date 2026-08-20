@@ -64,6 +64,10 @@ config.local.yaml
 # MkDocs build output
 site/
 
+# Control Center frontend build output
+control_center_ui/node_modules/
+control_center_ui/dist/
+
 # TSRBench inference artifacts
 data/tsrbench/datasets/
 data/tsrbench/evaluation/results/

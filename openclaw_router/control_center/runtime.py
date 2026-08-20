@@ -15,6 +15,7 @@ from typing import Optional
 
 from ..config import ControlCenterConfig
 from . import migrations
+from .auth import AdminAuthService
 from .queries import TelemetryQueryService
 from .telemetry import RoutingEvent, TelemetryService
 
@@ -37,6 +38,7 @@ class ControlCenterRuntime:
     last_error: Optional[str] = None
     telemetry: Optional[TelemetryService] = None
     queries: Optional[TelemetryQueryService] = None
+    admin_auth: Optional[AdminAuthService] = None
 
     @classmethod
     def disabled(cls) -> "ControlCenterRuntime":
@@ -55,6 +57,12 @@ class ControlCenterRuntime:
             self.state = ControlCenterState.DISABLED
             return
 
+        self.admin_auth = AdminAuthService(
+            os.getenv("LLMROUTER_ADMIN_TOKEN"),
+            session_ttl_seconds=self.config.admin_session_ttl_seconds,
+            login_window_seconds=self.config.admin_login_window_seconds,
+            login_max_attempts=self.config.admin_login_max_attempts,
+        )
         try:
             self.config.validate()
             self.schema_version = migrations.migrate(self.config.db_path)
@@ -92,6 +100,12 @@ class ControlCenterRuntime:
                 "queue_depth": snapshot.queue_depth,
                 "writer_alive": snapshot.writer_alive,
             }
+        payload["admin_auth"] = {
+            "configured": bool(self.admin_auth and self.admin_auth.configured),
+            "active_sessions": self.admin_auth.active_session_count()
+            if self.admin_auth
+            else 0,
+        }
         return payload
 
     def record(self, event: RoutingEvent) -> bool:

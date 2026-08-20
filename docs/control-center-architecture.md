@@ -1,6 +1,6 @@
 # LLMRouter Control Center Architecture Boundaries
 
-> Phase: 0–1 (control-plane skeleton and routing telemetry)
+> Phase: 0–2 (control-plane skeleton, telemetry, and read-only dashboard)
 > Date: 2026-08-20
 
 ## Purpose
@@ -45,8 +45,9 @@ Rules:
 - `control_center` may import configuration dataclasses and the Python standard
   library only.
 - `server.py` owns the thin integration: it registers
-  `app.state.control_center`, wires `/admin/api/status`, and submits narrow
-  structured events through a non-blocking callback.
+  `app.state.control_center`, mounts the authenticated management API and
+  Dashboard assets, and submits narrow structured events through a non-blocking
+  callback.
 - The inference hot path never opens, queries, or waits for SQLite. Its only
   telemetry operation is bounded in-memory `put_nowait`.
 
@@ -67,7 +68,8 @@ fail:
 
 - The main FastAPI application still starts.
 - `/health` and `/v1/*` remain available.
-- `/admin/api/status` returns HTTP 503 with `status: degraded`.
+- An authenticated `/admin/api/status` request returns HTTP 503 with
+  `status: degraded`.
 - The error is logged without exposing absolute paths, SQL, environment
   variables, or raw exceptions.
 
@@ -85,10 +87,6 @@ fail:
 
 ## Status contract
 
-Only one management route exists in phase 0:
-
-- `GET /admin/api/status`
-
 Three states:
 
 1. **Disabled** (`enabled: false`) → HTTP 404, stable error code
@@ -103,12 +101,18 @@ Three states:
 The response never contains the database path, configuration body, secrets, or
 raw exceptions.
 
-## What is intentionally absent through phase 1
+Phase 2 preserves the disabled 404 contract before authentication. When the
+Control Center is enabled, all status and management data routes are mounted on
+a protected router and require the dedicated administrator session. Login and
+logout remain explicit public/session-lifecycle routes; logout additionally
+requires exact loopback Origin matching and a CSRF token.
 
-No UI, login, token, cookie, CSRF, CORS, management telemetry HTTP API, config
-drafts, snapshots, diff, publish, hot update, rollback, `RuntimeSnapshot`,
-Route Lab, A/B testing, test sets, 9router `/v1/models` calls, or phase 2–5
-business tables.
+## What is intentionally absent through phase 2
+
+No configuration drafts, snapshots, diff, publish, hot update, rollback,
+`RuntimeSnapshot`, Route Lab, A/B testing, test sets, export, 9router
+`/v1/models` calls, or phase 3–5 business tables. Phase 2 adds only an
+authenticated read-only Dashboard and management API.
 
 ## Migration rules
 

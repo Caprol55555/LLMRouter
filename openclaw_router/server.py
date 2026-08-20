@@ -19,12 +19,15 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import AsyncGenerator, Callable, Optional, Dict, Any, List
+from urllib.parse import urlparse
 
 # Check dependencies
 try:
-    from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-    from fastapi.responses import JSONResponse, StreamingResponse
+    from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+    from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
     from pydantic import BaseModel
     import httpx
     import uvicorn
@@ -579,6 +582,12 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
     control_center = ControlCenterRuntime(config.control_center)
     control_center.initialize()
     app.state.control_center = control_center
+    dashboard_dir = Path(
+        os.getenv(
+            "LLMROUTER_DASHBOARD_DIR",
+            str(Path(__file__).resolve().parent / "control_center" / "static"),
+        )
+    ).resolve()
 
     def emit_routing_event(
         *,
@@ -612,6 +621,113 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
         if parse_auto_policy(requested_model, config.session_routing) is not None:
             return requested_model
         return "invalid"
+
+    def admin_error(status_code: int, code: str, message: str) -> JSONResponse:
+        return JSONResponse(
+            status_code=status_code,
+            content={"error": {"code": code, "message": message}},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    class AdminAccessError(Exception):
+        def __init__(self, status_code: int, code: str, message: str):
+            self.status_code = status_code
+            self.code = code
+            self.message = message
+
+    @app.exception_handler(AdminAccessError)
+    async def handle_admin_access_error(_request: Request, exc: AdminAccessError):
+        return admin_error(exc.status_code, exc.code, exc.message)
+
+    def local_origin_allowed(request: Request) -> bool:
+        origin = request.headers.get("origin", "")
+        try:
+            parsed = urlparse(origin)
+        except ValueError:
+            return False
+        return (
+            parsed.scheme in {"http", "https"}
+            and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+            and parsed.username is None
+            and parsed.password is None
+            and not parsed.path
+            and not parsed.params
+            and not parsed.query
+            and not parsed.fragment
+            and parsed.netloc.lower() == request.headers.get("host", "").lower()
+        )
+
+    def normalized_time_filter(value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        if len(value) > 128:
+            raise ValueError("time filter is too long")
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            raise ValueError("time filter must include a timezone")
+        return parsed.astimezone(timezone.utc).isoformat()
+
+    def admin_session_valid(request: Request, *, require_csrf: bool = False) -> bool:
+        auth = control_center.admin_auth
+        if auth is None or not auth.configured:
+            return False
+        csrf_token = request.headers.get(auth.CSRF_HEADER) if require_csrf else None
+        if require_csrf and not csrf_token:
+            return False
+        return auth.verify(
+            request.cookies.get(auth.COOKIE_NAME),
+            csrf_token=csrf_token,
+        )
+
+    def require_admin_session(request: Request) -> None:
+        if not control_center.enabled:
+            raise AdminAccessError(
+                404,
+                "control_center_disabled",
+                "Control Center is disabled",
+            )
+        if not admin_session_valid(request):
+            raise AdminAccessError(
+                401,
+                "admin_unauthorized",
+                "Administrator session is required",
+            )
+
+    def require_admin_write(request: Request) -> None:
+        auth = control_center.admin_auth
+        if not local_origin_allowed(request):
+            raise AdminAccessError(403, "invalid_origin", "Request origin is not allowed")
+        if auth is None or not admin_session_valid(request, require_csrf=True):
+            raise AdminAccessError(
+                401,
+                "admin_unauthorized",
+                "Administrator session is required",
+            )
+
+    @app.middleware("http")
+    async def admin_security_headers(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/admin/api/") or request.url.path.startswith(
+            "/dashboard"
+        ):
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; script-src 'self'; style-src 'self'; "
+                "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
+                "base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+            )
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            response.headers["Referrer-Policy"] = "no-referrer"
+            response.headers["X-Frame-Options"] = "DENY"
+            response.headers["Permissions-Policy"] = (
+                "camera=(), microphone=(), geolocation=()"
+            )
+            if request.url.path.startswith("/admin/api/") or not request.url.path.startswith(
+                "/dashboard/assets/"
+            ):
+                response.headers["Cache-Control"] = "no-store"
+            else:
+                response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
 
     @app.middleware("http")
     async def require_v1_bearer(request: Request, call_next):
@@ -713,7 +829,171 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
             "commit": os.getenv("LLMROUTER_COMMIT_SHA", "unknown"),
         }
 
-    app.add_api_route("/admin/api/status", admin_api_status, methods=["GET"], include_in_schema=False)
+    protected_admin = APIRouter(
+        prefix="/admin/api",
+        dependencies=[Depends(require_admin_session)],
+    )
+
+    @app.post("/admin/api/login", include_in_schema=False)
+    async def admin_login(request: Request):
+        if not control_center.enabled:
+            return await admin_api_status(request)
+        auth = control_center.admin_auth
+        if auth is None or not auth.configured:
+            return admin_error(503, "admin_auth_unavailable", "Administrator login is unavailable")
+        if not local_origin_allowed(request):
+            return admin_error(403, "invalid_origin", "Request origin is not allowed")
+        content_length = request.headers.get("content-length")
+        if content_length and (
+            not content_length.isdigit() or int(content_length) > 8192
+        ):
+            return admin_error(413, "request_too_large", "Login request is too large")
+        try:
+            raw_body = bytearray()
+            async for chunk in request.stream():
+                raw_body.extend(chunk)
+                if len(raw_body) > 8192:
+                    return admin_error(413, "request_too_large", "Login request is too large")
+            body = json.loads(raw_body)
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+            body = {}
+        candidate = (
+            body.get("token", "")
+            if isinstance(body, dict) and set(body) == {"token"}
+            else ""
+        )
+        candidate = candidate if isinstance(candidate, str) else ""
+        client_key = request.client.host if request.client else "unknown"
+        session, result = auth.login(candidate, client_key)
+        if session is None:
+            status_code = 429 if result == "rate_limited" else 401
+            response = admin_error(
+                status_code,
+                "login_failed",
+                "Invalid administrator credentials",
+            )
+            if status_code == 429:
+                response.headers["Retry-After"] = str(auth.login_window_seconds)
+            return response
+        response = JSONResponse(
+            {
+                "status": "ok",
+                "csrf_token": session.csrf_token,
+                "expires_in": auth.session_ttl_seconds,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+        response.set_cookie(
+            auth.COOKIE_NAME,
+            session.session_token,
+            max_age=auth.session_ttl_seconds,
+            httponly=True,
+            secure=urlparse(request.headers.get("origin", "")).scheme == "https",
+            samesite="strict",
+            path="/admin",
+        )
+        return response
+
+    @protected_admin.get("/session", include_in_schema=False)
+    async def admin_session(request: Request):
+        auth = control_center.admin_auth
+        csrf_token = (
+            auth.csrf_for_session(request.cookies.get(auth.COOKIE_NAME))
+            if auth is not None
+            else None
+        )
+        if not csrf_token:
+            return admin_error(401, "admin_unauthorized", "Administrator session is required")
+        return JSONResponse(
+            {"status": "ok", "csrf_token": csrf_token},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @protected_admin.post(
+        "/logout",
+        dependencies=[Depends(require_admin_write)],
+        include_in_schema=False,
+    )
+    async def admin_logout(request: Request):
+        auth = control_center.admin_auth
+        assert auth is not None
+        auth.logout(request.cookies.get(auth.COOKIE_NAME))
+        response = JSONResponse({"status": "ok"}, headers={"Cache-Control": "no-store"})
+        response.delete_cookie(auth.COOKIE_NAME, path="/admin", samesite="strict")
+        return response
+
+    @protected_admin.get("/status", include_in_schema=False)
+    async def protected_admin_status(request: Request):
+        return await admin_api_status(request)
+
+    @protected_admin.get("/overview", include_in_schema=False)
+    async def admin_overview():
+        if control_center.queries is None:
+            return admin_error(503, "telemetry_unavailable", "Telemetry is unavailable")
+        return JSONResponse(
+            control_center.queries.overview(),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @protected_admin.get("/requests", include_in_schema=False)
+    async def admin_requests(
+        page: int = 1,
+        page_size: int = 50,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+        traffic_class: Optional[str] = None,
+        selected_model: Optional[str] = None,
+        final_status: Optional[str] = None,
+        config_version_id: Optional[int] = None,
+    ):
+        if control_center.queries is None:
+            return admin_error(503, "telemetry_unavailable", "Telemetry is unavailable")
+        for value in (traffic_class, selected_model, final_status):
+            if value is not None and len(value) > 128:
+                return admin_error(422, "invalid_filter", "A request filter is invalid")
+        try:
+            normalized_since = normalized_time_filter(since)
+            normalized_until = normalized_time_filter(until)
+        except (ValueError, TypeError):
+            return admin_error(422, "invalid_filter", "A request filter is invalid")
+        return JSONResponse(
+            control_center.queries.request_page(
+                page=page,
+                page_size=page_size,
+                since=normalized_since,
+                until=normalized_until,
+                traffic_class=traffic_class,
+                selected_model=selected_model,
+                final_status=final_status,
+                config_version_id=config_version_id,
+            ),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @protected_admin.get("/health", include_in_schema=False)
+    async def admin_health():
+        return JSONResponse(
+            control_center.status_payload(),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @protected_admin.get("/runtime", include_in_schema=False)
+    async def admin_runtime():
+        return JSONResponse(
+            {
+                "strategy": config.router.strategy,
+                "models": [
+                    {"name": name, "description": llm.description}
+                    for name, llm in config.llms.items()
+                ],
+                "session_cache_entries": route_cache.size if route_cache else 0,
+                "commit": os.getenv("LLMROUTER_COMMIT_SHA", "unknown"),
+                "schema_version": control_center.schema_version,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
+    app.include_router(protected_admin)
 
     @app.get("/v1/models")
     async def list_models():
@@ -1068,6 +1348,25 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
             result["model"] = selected_model
             record_completed("success", usage=result.get("usage"))
             return result
+
+    @app.get("/dashboard", include_in_schema=False)
+    @app.get("/dashboard/{asset_path:path}", include_in_schema=False)
+    async def dashboard(asset_path: str = ""):
+        if not control_center.enabled:
+            return admin_error(404, "control_center_disabled", "Control Center is disabled")
+        index_path = dashboard_dir / "index.html"
+        if not index_path.is_file():
+            return admin_error(503, "dashboard_unavailable", "Dashboard assets are unavailable")
+        requested = (dashboard_dir / asset_path).resolve() if asset_path else index_path
+        try:
+            requested.relative_to(dashboard_dir)
+        except ValueError:
+            return admin_error(404, "dashboard_asset_not_found", "Dashboard asset was not found")
+        if asset_path.startswith("assets/"):
+            if not requested.is_file():
+                return admin_error(404, "dashboard_asset_not_found", "Dashboard asset was not found")
+            return FileResponse(requested)
+        return FileResponse(index_path, media_type="text/html")
 
     @app.get("/")
     async def root():
