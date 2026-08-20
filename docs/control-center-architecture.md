@@ -1,6 +1,6 @@
 # LLMRouter Control Center Architecture Boundaries
 
-> Phase: 0–3 (control-plane skeleton, telemetry, dashboard, and configuration drafts)
+> Phase: 0–5 (control plane, telemetry, configuration lifecycle, and Route Lab)
 > Date: 2026-08-20
 
 ## Purpose
@@ -139,11 +139,39 @@ changing the inference runtime:
 See `docs/adr-002-configuration-drafts-and-version-history.md` for lifecycle and
 storage decisions.
 
-## What is intentionally absent through phase 3
+## Phase 4 activation boundary
 
-No publish or activation endpoint, hot update, runtime snapshot switching,
-cache invalidation, rollback, Route Lab, A/B testing, test sets, export, or
-9router `/v1/models` discovery. Those remain phase 4–5 work.
+Phase 4 adds atomic activation and rollback without mutating an in-flight
+request. Each request captures an immutable runtime bundle containing its
+configuration, router, backend, and session cache references. Administrative
+activation builds the candidate bundle first, then commits the SQLite active
+pointer under an optimistic expected-version check before swapping the process
+reference. A failed build or database transaction therefore leaves the old
+runtime active.
+
+Routing-semantic changes replace the session cache and report the number of
+entries cleared. Pure backend description changes reuse the existing cache.
+Rollback copies a historical snapshot into a new immutable version and records
+the source and target in the management audit stream; it never edits history.
+
+## Phase 5 discovery and Route Lab boundary
+
+The admin-only discovery endpoint calls the configured router's fixed `/models`
+path with the existing server-side credential. Browser input cannot supply a
+URL or credential. The response reports model IDs and explicitly states that
+Combo internal recursion was not verified.
+
+Route Lab evaluates temporary task text against the active version, a selected
+immutable version, or a draft. It disables session caching, labels telemetry as
+`admin_test`, never stores task text, and supports an optional second version
+for comparison. It only exercises the configured router/backend boundaries.
+
+## What is intentionally absent through phase 5
+
+No test-set persistence, CSV/JSON export, arbitrary upstream URLs, browser
+credential entry, or Docker-socket restart control is exposed. Production
+hardening, retention jobs, backup verification, and deployment remain phase 6–7
+work.
 
 ## Migration rules
 

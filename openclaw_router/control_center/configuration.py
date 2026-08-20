@@ -241,6 +241,35 @@ def build_managed_snapshot(config: OpenClawConfig) -> Dict[str, Any]:
     }
 
 
+def apply_managed_snapshot(config: OpenClawConfig, snapshot: Any) -> OpenClawConfig:
+    """Apply the editable snapshot to a cloned application configuration.
+
+    Read-only provider, credential, listener, and filesystem settings remain
+    owned by the original configuration object. The caller is responsible for
+    cloning it before invoking this helper.
+    """
+    normalized = normalize_snapshot(snapshot, config.llms)
+    router = normalized["router"]
+    config.router.model = router["judge_model"]
+    config.router.default_model = router["default_model"]
+    config.router.judge_timeout_seconds = router["judge_timeout_seconds"]
+    config.router.judge_max_tokens = router["judge_max_tokens"]
+    config.router.routing_context_chars = router["routing_context_chars"]
+    config.router.judge_system_prompt = router["judge_system_prompt"]
+
+    session = normalized["session_routing"]
+    for key, value in session.items():
+        setattr(config.session_routing, key, value)
+
+    for alias, values in normalized["llms"].items():
+        llm = config.llms[alias]
+        llm.model_id = values["model"]
+        llm.description = values["description"]
+        llm.max_tokens = values["max_tokens"]
+        llm.context_limit = values["context_limit"]
+    return config
+
+
 def normalize_snapshot(snapshot: Any, configured_aliases: Iterable[str]) -> Dict[str, Any]:
     """Enforce the closed schema and return a deterministic representation."""
     aliases = sorted(set(configured_aliases))
@@ -646,6 +675,120 @@ class ConfigurationService:
         if row is None:
             raise ConfigurationNotFound("Configuration version was not found")
         return self._version_row(row, True, active_id)
+
+    def activate_version(
+        self,
+        version_id: int,
+        *,
+        expected_active_version_id: int,
+    ) -> Dict[str, Any]:
+        """Move the active pointer with an optimistic version check."""
+        now = _utc_now()
+        with closing(self._connect()) as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                active_id = self._active_version_id(connection)
+                if active_id != int(expected_active_version_id):
+                    raise ConfigurationConflict("Active configuration version changed")
+                row = connection.execute(
+                    "SELECT * FROM configuration_versions WHERE version_id = ?",
+                    (int(version_id),),
+                ).fetchone()
+                if row is None:
+                    raise ConfigurationNotFound("Configuration version was not found")
+                if int(row["version_id"]) == active_id:
+                    raise ConfigurationConflict("Configuration version is already active")
+                connection.execute(
+                    "UPDATE configuration_state SET active_version_id = ?, updated_at = ? "
+                    "WHERE singleton_id = 1",
+                    (int(version_id), now),
+                )
+                self._insert_audit(
+                    connection,
+                    action="version_activated",
+                    outcome="success",
+                    subject_type="configuration_version",
+                    subject_id=str(version_id),
+                    summary={
+                        "from_version_id": active_id,
+                        "to_version_id": int(version_id),
+                    },
+                    occurred_at=now,
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                self._rollback(connection)
+                raise
+        return self.get_version(int(version_id))
+
+    def rollback_version(
+        self,
+        target_version_id: int,
+        *,
+        expected_active_version_id: int,
+        release_notes: str = "",
+    ) -> Dict[str, Any]:
+        """Create a new immutable snapshot from history and activate it."""
+        notes = self._normalize_release_notes(release_notes)
+        now = _utc_now()
+        with closing(self._connect()) as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                active_id = self._active_version_id(connection)
+                if active_id != int(expected_active_version_id):
+                    raise ConfigurationConflict("Active configuration version changed")
+                target = connection.execute(
+                    "SELECT * FROM configuration_versions WHERE version_id = ?",
+                    (int(target_version_id),),
+                ).fetchone()
+                if target is None:
+                    raise ConfigurationNotFound("Rollback target version was not found")
+                if int(target["version_id"]) == active_id:
+                    raise ConfigurationConflict("Rollback target is already active")
+                next_number = int(
+                    connection.execute(
+                        "SELECT COALESCE(MAX(version_number), 0) + 1 FROM configuration_versions"
+                    ).fetchone()[0]
+                )
+                if not notes:
+                    notes = f"Rollback to version {int(target['version_number'])}"
+                cursor = connection.execute(
+                    "INSERT INTO configuration_versions "
+                    "(version_number, parent_version_id, source, snapshot_json, checksum, release_notes, created_at) "
+                    "VALUES (?, ?, 'draft', ?, ?, ?, ?)",
+                    (
+                        next_number,
+                        active_id,
+                        target["snapshot_json"],
+                        target["checksum"],
+                        notes,
+                        now,
+                    ),
+                )
+                new_version_id = int(cursor.lastrowid)
+                connection.execute(
+                    "UPDATE configuration_state SET active_version_id = ?, updated_at = ? "
+                    "WHERE singleton_id = 1",
+                    (new_version_id, now),
+                )
+                self._insert_audit(
+                    connection,
+                    action="version_rolled_back",
+                    outcome="success",
+                    subject_type="configuration_version",
+                    subject_id=str(new_version_id),
+                    summary={
+                        "from_version_id": active_id,
+                        "target_version_id": int(target_version_id),
+                        "new_version_id": new_version_id,
+                    },
+                    occurred_at=now,
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                self._rollback(connection)
+                raise
+        return self.get_version(new_version_id)
 
     def list_drafts(self) -> List[Dict[str, Any]]:
         with closing(self._connect()) as connection:

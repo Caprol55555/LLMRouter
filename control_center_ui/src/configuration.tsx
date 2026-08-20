@@ -93,6 +93,23 @@ type AuditPage = {
   }>;
   total: number;
 };
+type LabResult = {
+  result: {
+    selected_model: string;
+    judge_status: string;
+    used_default: boolean;
+    judge_latency_ms: number | null;
+    traffic_class: string;
+    persisted: boolean;
+  };
+  comparison?: LabResult["result"];
+};
+type DiscoveryResult = {
+  status: string;
+  models: string[];
+  reason?: string;
+  combo_internal_recursion_checked?: boolean;
+};
 type DraftDiff = {
   changes: Array<{ path: string; before: unknown; after: unknown }>;
 };
@@ -159,6 +176,10 @@ export function ConfigurationPage({
   const [actionBusy, setActionBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [labText, setLabText] = useState("");
+  const [labResult, setLabResult] = useState<LabResult | null>(null);
+  const [labVersionId, setLabVersionId] = useState("");
+  const [discovery, setDiscovery] = useState<DiscoveryResult | null>(null);
 
   function handleError(reason: unknown) {
     const apiError = reason as ApiError;
@@ -347,6 +368,61 @@ export function ConfigurationPage({
     });
   }
 
+  async function activateVersion(version: Version) {
+    if (!summary || version.is_active) return;
+    await perform(async () => {
+      const result = await api<Version & { cache_cleared: number; cache_clear_reason: string }>(
+        `/admin/api/configuration/versions/${version.version_id}/activate`,
+        {
+          method: "POST",
+          headers: writeHeaders(),
+          body: JSON.stringify({ expected_active_version_id: summary.active.version_id }),
+        },
+      );
+      setNotice(`Activated v${result.version_number}; cleared ${result.cache_cleared} cached routes.`);
+      await loadPage();
+    });
+  }
+
+  async function rollbackVersion(version: Version) {
+    if (!summary || version.is_active || !window.confirm(`Rollback to v${version.version_number}?`)) return;
+    await perform(async () => {
+      const result = await api<Version & { cache_cleared: number }>(
+        `/admin/api/configuration/versions/${version.version_id}/rollback`,
+        {
+          method: "POST",
+          headers: writeHeaders(),
+          body: JSON.stringify({
+            expected_active_version_id: summary.active.version_id,
+            release_notes: `Rollback to version ${version.version_number}`,
+          }),
+        },
+      );
+      setNotice(`Rollback created and activated v${result.version_number}.`);
+      await loadPage();
+    });
+  }
+
+  async function runDiscovery() {
+    await perform(async () => {
+      setDiscovery(await api<DiscoveryResult>("/admin/api/discovery/models"));
+    });
+  }
+
+  async function runLab() {
+    if (!labText.trim()) return;
+    await perform(async () => {
+      const body: Record<string, unknown> = { text: labText };
+      if (labVersionId) body.version_id = Number(labVersionId);
+      if (draft?.status !== "finalized" && draft?.draft_id) body.draft_id = draft.draft_id;
+      setLabResult(await api<LabResult>("/admin/api/route-lab/evaluate", {
+        method: "POST",
+        headers: writeHeaders(),
+        body: JSON.stringify(body),
+      }));
+    });
+  }
+
   async function deleteDraft() {
     if (!draft || !window.confirm("Delete this editable draft?")) return;
     await perform(async () => {
@@ -383,7 +459,7 @@ export function ConfigurationPage({
 
       <section className="cards configuration-summary" aria-label="Configuration summary">
         <Metric label="Active version" value={`v${active.version_number}`} hint={active.source} />
-        <Metric label="Runtime state" value="Unchanged" hint="Stage 3 drafts never activate" />
+        <Metric label="Runtime state" value="Active" hint="Atomic activation enabled" />
         <Metric label="Drafts" value={String(summary.drafts.length)} hint="maximum 100 listed" />
         <Metric label="Pending versions" value={String(versions?.items.filter((item) => item.publish_state === "pending").length || 0)} />
       </section>
@@ -392,7 +468,7 @@ export function ConfigurationPage({
         <div className="panel-title configuration-title">
           <div>
             <h2>Configuration drafts</h2>
-            <span>Editing and validation only; activation is not available in this stage.</span>
+            <span>Drafts are validated before atomic activation; rollback creates a new immutable version.</span>
           </div>
           <button onClick={() => void createDraft()} disabled={actionBusy}>Create draft</button>
         </div>
@@ -620,13 +696,17 @@ export function ConfigurationPage({
         <section className="panel">
           <div className="panel-title"><h2>Version history</h2><span>Immutable snapshots</span></div>
           {!versions?.items.length ? <div className="state">No configuration versions.</div> : (
-            <div className="table-wrap"><table className="compact-table"><thead><tr><th>Version</th><th>State</th><th>Source</th><th>Created</th><th>Release notes</th></tr></thead><tbody>
+            <div className="table-wrap"><table className="compact-table"><thead><tr><th>Version</th><th>State</th><th>Source</th><th>Created</th><th>Release notes</th><th>Actions</th></tr></thead><tbody>
               {versions.items.map((item) => <tr key={item.version_id}>
                 <td>v{item.version_number}</td>
                 <td><span className={`status ${item.publish_state}`}>{item.publish_state}</span></td>
                 <td>{item.source}</td>
                 <td>{new Date(item.created_at).toLocaleString()}</td>
                 <td>{item.release_notes || "—"}</td>
+                <td><div className="actions compact-actions">
+                  {!item.is_active && <button className="secondary" disabled={actionBusy} onClick={() => void activateVersion(item)}>Activate</button>}
+                  {!item.is_active && <button className="danger" disabled={actionBusy} onClick={() => void rollbackVersion(item)}>Rollback</button>}
+                </div></td>
               </tr>)}
             </tbody></table></div>
           )}
@@ -642,6 +722,31 @@ export function ConfigurationPage({
               </article>)}
             </div>
           )}
+        </section>
+      </div>
+
+      <div className="configuration-columns">
+        <section className="panel">
+          <div className="panel-title"><h2>Route Lab</h2><span>Admin test only; input is not persisted</span></div>
+          <Field label="Task text" htmlFor="route-lab-text">
+            <textarea id="route-lab-text" rows={5} value={labText} onChange={(event) => setLabText(event.target.value)} placeholder="Enter a temporary routing task" />
+          </Field>
+          <div className="form-grid">
+            <Field label="Version ID (optional)" htmlFor="route-lab-version">
+              <input id="route-lab-version" value={labVersionId} onChange={(event) => setLabVersionId(event.target.value)} inputMode="numeric" />
+            </Field>
+            <div className="actions"><button onClick={() => void runLab()} disabled={actionBusy || !labText.trim()}>Evaluate route</button></div>
+          </div>
+          {labResult && <div className="notice">Selected <strong>{labResult.result.selected_model}</strong> · {labResult.result.judge_status} · {labResult.result.judge_latency_ms == null ? "no judge" : `${labResult.result.judge_latency_ms.toFixed(1)} ms`} · persisted: no</div>}
+        </section>
+        <section className="panel">
+          <div className="panel-title"><h2>Upstream model discovery</h2><span>Read only; Combo recursion is not verified</span></div>
+          <button className="secondary" onClick={() => void runDiscovery()} disabled={actionBusy}>Check configured router models</button>
+          {discovery && <div className={discovery.status === "ok" ? "notice" : "validation"}>
+            <strong>{discovery.status}</strong>
+            {discovery.models.length > 0 ? <ul>{discovery.models.map((model) => <li key={model}><code>{model}</code></li>)}</ul> : <p>{discovery.reason || "No models returned."}</p>}
+            <small>Model ID existence does not prove Combo internal recursion safety.</small>
+          </div>}
         </section>
       </div>
     </div>

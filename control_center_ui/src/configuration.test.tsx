@@ -206,7 +206,7 @@ describe("Configuration page", () => {
     expect(screen.getByLabelText("TTL seconds")).toBeTruthy();
   });
 
-  it("finalizes only to a pending version and exposes no activation controls", async () => {
+  it("finalizes to a pending version and exposes activation controls", async () => {
     let current = draft("ready");
     const pending = { ...active, version_id: 2, version_number: 2, is_active: false, publish_state: "pending", source: "draft" };
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -225,7 +225,7 @@ describe("Configuration page", () => {
     expect(await screen.findByText(/Version 2 is pending/)).toBeTruthy();
     expect(screen.getByText("pending")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /publish/i })).toBeNull();
-    expect(screen.queryByRole("button", { name: /activate/i })).toBeNull();
-    expect(screen.queryByRole("button", { name: /rollback/i })).toBeNull();
+    expect(screen.getByRole("button", { name: /activate/i })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /rollback/i })).toBeTruthy();
   });
 });

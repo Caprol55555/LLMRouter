@@ -15,6 +15,8 @@ import hmac
 import os
 import re
 import sys
+import copy
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -56,6 +58,9 @@ try:
         ConfigurationNotFound,
         DraftValidationError,
         SnapshotStructureError,
+        apply_managed_snapshot,
+        normalize_snapshot,
+        validate_snapshot,
     )
 except ImportError:
     from config import OpenClawConfig, LLMConfig, MODELS_WITHOUT_SYSTEM_ROLE, MODEL_CONTEXT_LIMITS
@@ -77,6 +82,9 @@ except ImportError:
         ConfigurationNotFound,
         DraftValidationError,
         SnapshotStructureError,
+        apply_managed_snapshot,
+        normalize_snapshot,
+        validate_snapshot,
     )
 
 
@@ -111,6 +119,18 @@ class RoutingDecision:
     cache_status: str
     rejudge_reason: Optional[str]
     judge_outcome: Optional[JudgeOutcome]
+
+
+@dataclass(frozen=True)
+class RuntimeBundle:
+    """Immutable request-level references for one active configuration."""
+
+    config: OpenClawConfig
+    router: OpenClawRouter
+    backend: "LLMBackend"
+    route_cache: Optional[SessionRouteCache]
+    version_id: Optional[int] = None
+    version_number: Optional[int] = None
 
 
 def _safe_token_count(value: Any) -> Optional[int]:
@@ -596,6 +616,175 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
     control_center = ControlCenterRuntime(config.control_center, application_config=config)
     control_center.initialize()
     app.state.control_center = control_center
+    runtime_lock = threading.RLock()
+    initial_version_id: Optional[int] = None
+    initial_version_number: Optional[int] = None
+    if control_center.configuration is not None:
+        try:
+            active = control_center.configuration.active_configuration()
+            initial_version_id = int(active["version_id"])
+            initial_version_number = int(active["version_number"])
+        except Exception:
+            pass
+    runtime_bundle = RuntimeBundle(
+        config=config,
+        router=router,
+        backend=backend,
+        route_cache=route_cache,
+        version_id=initial_version_id,
+        version_number=initial_version_number,
+    )
+    app.state.runtime_bundle = runtime_bundle
+
+    def current_runtime() -> RuntimeBundle:
+        with runtime_lock:
+            return runtime_bundle
+
+    def swap_runtime(candidate: RuntimeBundle) -> RuntimeBundle:
+        nonlocal runtime_bundle
+        with runtime_lock:
+            previous = runtime_bundle
+            runtime_bundle = candidate
+            app.state.runtime_bundle = candidate
+            app.state.router = candidate.router
+            app.state.backend = candidate.backend
+            app.state.route_cache = candidate.route_cache
+            return previous
+
+    def cache_affecting_changed(before: Dict[str, Any], after: Dict[str, Any]) -> bool:
+        """Return whether a version change can alter sticky routing semantics."""
+        before_router = dict(before.get("router", {}))
+        after_router = dict(after.get("router", {}))
+        before_session = before.get("session_routing", {})
+        after_session = after.get("session_routing", {})
+        before_llms = {
+            alias: {key: value for key, value in values.items() if key != "description"}
+            for alias, values in before.get("llms", {}).items()
+        }
+        after_llms = {
+            alias: {key: value for key, value in values.items() if key != "description"}
+            for alias, values in after.get("llms", {}).items()
+        }
+        return (
+            before_router != after_router
+            or before_session != after_session
+            or before_llms != after_llms
+        )
+
+    def build_runtime_candidate(version: Dict[str, Any], current: RuntimeBundle) -> RuntimeBundle:
+        candidate_config = copy.copy(current.config)
+        for field_name in (
+            "router",
+            "llms",
+            "api_keys",
+            "memory",
+            "session_routing",
+            "security",
+            "media",
+            "control_center",
+        ):
+            setattr(candidate_config, field_name, copy.deepcopy(getattr(current.config, field_name)))
+        # The key cycle is intentionally shared, while the lock belongs to the
+        # candidate object so no deepcopy or cross-version lock sharing occurs.
+        candidate_config._nvidia_key_cycle = current.config._nvidia_key_cycle
+        candidate_config._nvidia_key_lock = threading.Lock()
+        apply_managed_snapshot(candidate_config, version["snapshot"])
+        candidate_router = OpenClawRouter(candidate_config)
+        candidate_backend = LLMBackend(candidate_config)
+        candidate_cache = (
+            SessionRouteCache(candidate_config.session_routing)
+            if candidate_config.session_routing.enabled
+            else None
+        )
+        return RuntimeBundle(
+            config=candidate_config,
+            router=candidate_router,
+            backend=candidate_backend,
+            route_cache=candidate_cache,
+            version_id=int(version["version_id"]),
+            version_number=int(version["version_number"]),
+        )
+
+    def activate_runtime_version(
+        version_id: int,
+        *,
+        expected_active_version_id: int,
+    ) -> Dict[str, Any]:
+        service = configuration_service()
+        with runtime_lock:
+            current = runtime_bundle
+            current_version_id = current.version_id
+            if current_version_id is not None and current_version_id != int(expected_active_version_id):
+                raise ConfigurationConflict("Active runtime version changed")
+            version = service.get_version(int(version_id))
+            if version["publish_state"] == "active":
+                raise ConfigurationConflict("Configuration version is already active")
+            candidate = build_runtime_candidate(version, current)
+            previous_cache_size = current.route_cache.size if current.route_cache else 0
+            activated = service.activate_version(
+                int(version_id),
+                expected_active_version_id=int(expected_active_version_id),
+            )
+            old_snapshot = service.get_version(int(expected_active_version_id))["snapshot"]
+            semantics_changed = cache_affecting_changed(old_snapshot, version["snapshot"])
+            cleared = previous_cache_size if semantics_changed else 0
+            if not semantics_changed and current.route_cache is not None and candidate.route_cache is not None:
+                candidate = RuntimeBundle(
+                    config=candidate.config,
+                    router=candidate.router,
+                    backend=candidate.backend,
+                    route_cache=current.route_cache,
+                    version_id=candidate.version_id,
+                    version_number=candidate.version_number,
+                )
+            swap_runtime(candidate)
+            activated["cache_cleared"] = cleared
+            activated["cache_clear_reason"] = "routing_semantics_changed" if semantics_changed else "display_only"
+            return activated
+
+    def rollback_runtime_version(
+        target_version_id: int,
+        *,
+        expected_active_version_id: int,
+        release_notes: str,
+    ) -> Dict[str, Any]:
+        service = configuration_service()
+        with runtime_lock:
+            current = runtime_bundle
+            if current.version_id is not None and current.version_id != int(expected_active_version_id):
+                raise ConfigurationConflict("Active runtime version changed")
+            target = service.get_version(int(target_version_id))
+            candidate = build_runtime_candidate(target, current)
+            previous_cache_size = current.route_cache.size if current.route_cache else 0
+            activated = service.rollback_version(
+                int(target_version_id),
+                expected_active_version_id=int(expected_active_version_id),
+                release_notes=release_notes,
+            )
+            old_snapshot = current.config and service.get_version(int(expected_active_version_id))["snapshot"]
+            semantics_changed = cache_affecting_changed(old_snapshot, target["snapshot"])
+            cleared = previous_cache_size if semantics_changed else 0
+            if not semantics_changed and current.route_cache is not None and candidate.route_cache is not None:
+                candidate = RuntimeBundle(
+                    config=candidate.config,
+                    router=candidate.router,
+                    backend=candidate.backend,
+                    route_cache=current.route_cache,
+                    version_id=candidate.version_id,
+                    version_number=candidate.version_number,
+                )
+            candidate = RuntimeBundle(
+                config=candidate.config,
+                router=candidate.router,
+                backend=candidate.backend,
+                route_cache=candidate.route_cache,
+                version_id=int(activated["version_id"]),
+                version_number=int(activated["version_number"]),
+            )
+            swap_runtime(candidate)
+            activated["cache_cleared"] = cleared
+            activated["cache_clear_reason"] = "routing_semantics_changed" if semantics_changed else "display_only"
+            return activated
     dashboard_dir = Path(
         os.getenv(
             "LLMROUTER_DASHBOARD_DIR",
@@ -846,9 +1035,13 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
         payload: ChatRequest,
         messages: List[Dict[str, Any]],
         session_header: Optional[str],
+        bundle: RuntimeBundle,
         judge_observer: Optional[Callable[[JudgeOutcome], None]] = None,
     ) -> RoutingDecision:
-        available_models = list(config.llms.keys())
+        request_config = bundle.config
+        request_router = bundle.router
+        request_route_cache = bundle.route_cache
+        available_models = list(request_config.llms.keys())
         if payload.model in available_models:
             _safe_log(f"[Route] explicit model={payload.model}")
             return RoutingDecision(
@@ -859,12 +1052,12 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                 judge_outcome=None,
             )
 
-        policy = parse_auto_policy(payload.model, config.session_routing)
+        policy = parse_auto_policy(payload.model, request_config.session_routing)
         if policy is None:
             raise HTTPException(status_code=404, detail=f"Model '{payload.model}' not found")
 
         routing_context = build_routing_context(
-            messages, config.router.routing_context_chars
+            messages, request_config.router.routing_context_chars
         )
         judge_outcomes: List[JudgeOutcome] = []
 
@@ -873,8 +1066,8 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
             if judge_observer is not None:
                 judge_observer(outcome)
 
-        if route_cache is None:
-            selected = await router.select_model(
+        if request_route_cache is None:
+            selected = await request_router.select_model(
                 routing_context,
                 user=payload.user,
                 judge_observer=observe_judge,
@@ -892,17 +1085,17 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
             messages,
             user=payload.user,
             header_value=session_header,
-            fallback_hash_chars=config.session_routing.fallback_hash_chars,
+            fallback_hash_chars=request_config.session_routing.fallback_hash_chars,
         )
         user_turns = count_user_turns(messages)
         modality = detect_modality(messages)
-        selected, cache_hit, rejudge_reason = await route_cache.get_or_select_detailed(
+        selected, cache_hit, rejudge_reason = await request_route_cache.get_or_select_detailed(
             session_key,
             user_turns=user_turns,
             policy=policy,
             modality=modality,
             allowed_models=available_models,
-            selector=lambda: router.select_model(
+            selector=lambda: request_router.select_model(
                 routing_context,
                 user=payload.user,
                 judge_observer=observe_judge,
@@ -922,11 +1115,12 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
 
     @app.get("/health")
     async def health():
+        current = current_runtime()
         return {
             "status": "ok",
-            "strategy": config.router.strategy,
-            "llms": list(config.llms.keys()),
-            "session_cache_entries": route_cache.size if route_cache else 0,
+            "strategy": current.config.router.strategy,
+            "llms": list(current.config.llms.keys()),
+            "session_cache_entries": current.route_cache.size if current.route_cache else 0,
             "commit": os.getenv("LLMROUTER_COMMIT_SHA", "unknown"),
         }
 
@@ -1089,6 +1283,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
 
     @protected_admin.get("/runtime", include_in_schema=False)
     async def admin_runtime():
+        current = current_runtime()
         active = (
             control_center.configuration.active_configuration()
             if control_center.configuration is not None
@@ -1096,12 +1291,12 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
         )
         return JSONResponse(
             {
-                "strategy": config.router.strategy,
+                "strategy": current.config.router.strategy,
                 "models": [
                     {"name": name, "description": llm.description}
-                    for name, llm in config.llms.items()
+                    for name, llm in current.config.llms.items()
                 ],
-                "session_cache_entries": route_cache.size if route_cache else 0,
+                "session_cache_entries": current.route_cache.size if current.route_cache else 0,
                 "commit": os.getenv("LLMROUTER_COMMIT_SHA", "unknown"),
                 "schema_version": control_center.schema_version,
                 "config_version_id": active["version_id"] if active else None,
@@ -1253,6 +1448,172 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
             headers={"Cache-Control": "no-store"},
         )
 
+    @protected_admin_write.post(
+        "/configuration/versions/{version_id}/activate", include_in_schema=False
+    )
+    async def activate_configuration_version(version_id: int, request: Request):
+        body = strict_object(
+            await read_admin_json(request),
+            allowed={"expected_active_version_id"},
+            required={"expected_active_version_id"},
+        )
+        expected = body["expected_active_version_id"]
+        if isinstance(expected, bool) or not isinstance(expected, int):
+            raise SnapshotStructureError("expected_active_version_id must be an integer")
+        return JSONResponse(
+            activate_runtime_version(
+                int(version_id), expected_active_version_id=expected
+            ),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @protected_admin_write.post(
+        "/configuration/versions/{version_id}/rollback", include_in_schema=False
+    )
+    async def rollback_configuration_version(version_id: int, request: Request):
+        body = strict_object(
+            await read_admin_json(request),
+            allowed={"expected_active_version_id", "release_notes"},
+            required={"expected_active_version_id"},
+        )
+        expected = body["expected_active_version_id"]
+        if isinstance(expected, bool) or not isinstance(expected, int):
+            raise SnapshotStructureError("expected_active_version_id must be an integer")
+        release_notes = body.get("release_notes", "")
+        if not isinstance(release_notes, str):
+            raise SnapshotStructureError("release_notes must be a string")
+        return JSONResponse(
+            rollback_runtime_version(
+                int(version_id),
+                expected_active_version_id=expected,
+                release_notes=release_notes,
+            ),
+            status_code=201,
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @protected_admin.get("/discovery/models", include_in_schema=False)
+    async def discover_upstream_models():
+        current = current_runtime()
+        upstream = current.config.router
+        base_url = (upstream.base_url or "").rstrip("/")
+        if not base_url:
+            return JSONResponse(
+                {"status": "unavailable", "models": [], "reason": "router_base_url_missing"},
+                headers={"Cache-Control": "no-store"},
+            )
+        api_key = current.config.get_api_key(upstream.provider or "openai")
+        headers = {"Accept": "application/json"}
+        if api_key and upstream.auth_mode != "none":
+            headers["Authorization"] = f"Bearer {api_key}"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(f"{base_url}/models", headers=headers)
+            if response.status_code != 200:
+                record_admin_audit("model_discovery", "failure", summary={"reason": "upstream_status"})
+                return JSONResponse(
+                    {"status": "unavailable", "models": [], "reason": "upstream_status"},
+                    headers={"Cache-Control": "no-store"},
+                )
+            body = response.json()
+            raw_models = body.get("data", []) if isinstance(body, dict) else []
+            models = sorted(
+                {
+                    str(item.get("id"))
+                    for item in raw_models
+                    if isinstance(item, dict) and isinstance(item.get("id"), str)
+                }
+            )
+            record_admin_audit("model_discovery", "success", summary={"model_count": len(models)})
+            return JSONResponse(
+                {"status": "ok", "models": models, "combo_internal_recursion_checked": False},
+                headers={"Cache-Control": "no-store"},
+            )
+        except (httpx.HTTPError, ValueError, TypeError):
+            record_admin_audit("model_discovery", "failure", summary={"reason": "upstream_unavailable"})
+            return JSONResponse(
+                {"status": "unavailable", "models": [], "reason": "upstream_unavailable"},
+                headers={"Cache-Control": "no-store"},
+            )
+
+    @protected_admin_write.post("/route-lab/evaluate", include_in_schema=False)
+    async def evaluate_route_lab(request: Request):
+        body = strict_object(
+            await read_admin_json(request),
+            allowed={"text", "version_id", "draft_id", "compare_version_id"},
+            required={"text"},
+        )
+        text_value = body["text"]
+        if not isinstance(text_value, str) or not text_value.strip() or len(text_value) > 20_000:
+            raise SnapshotStructureError("text must be a non-empty string up to 20000 characters")
+        version_id = body.get("version_id")
+        draft_id = body.get("draft_id")
+        compare_version_id = body.get("compare_version_id")
+        for name, value in (("version_id", version_id), ("compare_version_id", compare_version_id)):
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+                raise SnapshotStructureError(f"{name} must be an integer")
+        if draft_id is not None and (not isinstance(draft_id, str) or len(draft_id) > 128):
+            raise SnapshotStructureError("draft_id is invalid")
+
+        current = current_runtime()
+        service = configuration_service()
+
+        def candidate_for(selected_version_id: Optional[int], selected_draft_id: Optional[str]) -> RuntimeBundle:
+            if selected_draft_id:
+                draft = service.get_draft(selected_draft_id)
+                snapshot = normalize_snapshot(draft["snapshot"], current.config.llms)
+                issues = validate_snapshot(
+                    snapshot,
+                    configured_aliases=current.config.llms,
+                    forbidden_models=current.config.security.forbidden_upstream_models,
+                    forbidden_prefixes=current.config.security.forbidden_upstream_prefixes,
+                )
+                if issues:
+                    raise DraftValidationError(issues)
+                version = {
+                    "version_id": current.version_id,
+                    "version_number": current.version_number,
+                    "snapshot": snapshot,
+                }
+            elif selected_version_id is not None:
+                version = service.get_version(selected_version_id)
+            else:
+                version = service.active_configuration()
+            candidate = build_runtime_candidate(version, current)
+            return RuntimeBundle(
+                config=candidate.config,
+                router=candidate.router,
+                backend=candidate.backend,
+                route_cache=None,
+                version_id=candidate.version_id,
+                version_number=candidate.version_number,
+            )
+
+        async def run_one(selected_version_id: Optional[int], selected_draft_id: Optional[str]) -> Dict[str, Any]:
+            started = time.perf_counter()
+            candidate = candidate_for(selected_version_id, selected_draft_id)
+            payload = ChatRequest(model="auto", messages=[Message(role="user", content=text_value)])
+            decision = await choose_request_model(payload, [{"role": "user", "content": text_value}], None, candidate)
+            outcome = decision.judge_outcome
+            return {
+                "version_id": candidate.version_id,
+                "version_number": candidate.version_number,
+                "selected_model": decision.selected_model,
+                "cache_status": "disabled",
+                "judge_status": outcome.status if outcome else "not_called",
+                "used_default": outcome.used_default if outcome else False,
+                "judge_latency_ms": outcome.latency_ms if outcome else None,
+                "elapsed_ms": (time.perf_counter() - started) * 1000,
+                "traffic_class": "admin_test",
+                "persisted": False,
+            }
+
+        result = {"result": await run_one(version_id, draft_id)}
+        if compare_version_id is not None:
+            result["comparison"] = await run_one(compare_version_id, None)
+        record_admin_audit("route_lab_evaluate", "success", summary={"comparison": compare_version_id is not None})
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
     @protected_admin_write.delete(
         "/configuration/drafts/{draft_id}", include_in_schema=False
     )
@@ -1269,11 +1630,12 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
 
     @app.get("/v1/models")
     async def list_models():
+        current = current_runtime()
         return {
             "object": "list",
             "data": [
                 {"id": name, "object": "model", "description": llm.description}
-                for name, llm in config.llms.items()
+                for name, llm in current.config.llms.items()
             ] + [
                 {"id": "auto", "object": "model", "description": "Session-aware auto router"},
                 {"id": "auto:once", "object": "model", "description": "Judge once per session TTL"},
@@ -1283,12 +1645,16 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                     "object": "model",
                     "description": f"Rejudge every {interval} new user turns",
                 }
-                for interval in config.session_routing.allowed_rejudge_intervals
+                for interval in current.config.session_routing.allowed_rejudge_intervals
             ]
         }
 
     @app.post("/v1/chat/completions")
     async def chat_completions(payload: ChatRequest, http_request: Request):
+        bundle = current_runtime()
+        request_config = bundle.config
+        request_backend = bundle.backend
+        request_route_cache = bundle.route_cache
         request_id = uuid.uuid4().hex
         request_started = time.perf_counter()
         decision: Optional[RoutingDecision] = None
@@ -1381,12 +1747,12 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
 
             # Process multimodal content if media is enabled
             # Supports both OpenAI format (list) and OpenClaw format (string with [media attached:...])
-            if config.media.enabled:
+            if request_config.media.enabled:
                 # Use together API key as fallback
-                together_key = config.api_keys.get("together")
+                together_key = request_config.api_keys.get("together")
                 try:
                     processed_text, media_desc = await process_multimodal_content(
-                        raw_content, config.media, fallback_key=together_key
+                        raw_content, request_config.media, fallback_key=together_key
                     )
                 except Exception as error:
                     record_completed("error", error_category=_error_category(error))
@@ -1408,7 +1774,8 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
             decision = await choose_request_model(
                 payload,
                 messages,
-                http_request.headers.get(config.session_routing.trusted_session_header),
+                http_request.headers.get(request_config.session_routing.trusted_session_header),
+                bundle,
                 judge_observer=record_judge,
             )
         except Exception as error:
@@ -1456,7 +1823,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                 try:
                     prefix_disabled = False
 
-                    stream_gen = await backend.call(
+                    stream_gen = await request_backend.call(
                         selected_model, messages, payload.max_tokens,
                         payload.temperature, stream=True,
                         tools=payload.tools,
@@ -1467,7 +1834,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                         chunk_usage = _stream_usage(chunk)
                         if chunk_usage is not None:
                             latest_usage = chunk_usage
-                        if not config.show_model_prefix:
+                        if not request_config.show_model_prefix:
                             mark_first_byte()
                             yield chunk
                             continue
@@ -1573,8 +1940,8 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                     stream_succeeded = True
                 except Exception as e:
                     stream_error_category = _error_category(e)
-                    if route_cache and config.session_routing.rejudge_on_backend_error:
-                        route_cache.invalidate(session_key)
+                    if request_route_cache and request_config.session_routing.rejudge_on_backend_error:
+                        request_route_cache.invalidate(session_key)
                     _safe_log(f"[Stream Error] type={type(e).__name__} session={(session_key or '')[:12]}")
                     mark_first_byte()
                     yield f'data: {json.dumps({"error": str(e)})}\n\n'
@@ -1597,19 +1964,19 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
 
         else:
             try:
-                result = await backend.call(
+                result = await request_backend.call(
                     selected_model, messages, payload.max_tokens,
                     payload.temperature, stream=False,
                     tools=payload.tools, tool_choice=payload.tool_choice
                 )
             except Exception as error:
-                if route_cache and config.session_routing.rejudge_on_backend_error:
-                    route_cache.invalidate(session_key)
+                if request_route_cache and request_config.session_routing.rejudge_on_backend_error:
+                    request_route_cache.invalidate(session_key)
                 record_completed("error", error_category=_error_category(error))
                 raise
 
             # Add model prefix
-            if config.show_model_prefix and result.get("choices"):
+            if request_config.show_model_prefix and result.get("choices"):
                 message = result["choices"][0].get("message", {})
                 content = message.get("content")
                 if content and not _message_has_tool_calls(message):
@@ -1642,11 +2009,12 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
 
     @app.get("/")
     async def root():
+        current = current_runtime()
         return {
             "name": "OpenClaw Router",
             "version": "1.0.0",
-            "strategy": config.router.strategy,
-            "llms": list(config.llms.keys()),
+            "strategy": current.config.router.strategy,
+            "llms": list(current.config.llms.keys()),
             "endpoints": {
                 "chat": "POST /v1/chat/completions",
                 "models": "GET /v1/models",
@@ -1657,16 +2025,21 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
     @app.get("/routers")
     async def list_routers():
         """List available routing strategies"""
+        current = current_runtime()
         return {
-            "available_routers": router.get_available_routers(),
-            "current": config.router.strategy
+            "available_routers": current.router.get_available_routers(),
+            "current": current.config.router.strategy
         }
 
     @app.websocket("/v1/chat/ws")
     async def chat_websocket(websocket: WebSocket):
         """WebSocket endpoint for real-time streaming"""
+        bundle = current_runtime()
+        request_config = bundle.config
+        request_backend = bundle.backend
+        request_route_cache = bundle.route_cache
         if not _authorized(
-            websocket.headers.get("authorization"), config.security.inbound_api_key
+            websocket.headers.get("authorization"), request_config.security.inbound_api_key
         ):
             await websocket.close(code=4401, reason="Invalid API key")
             return
@@ -1774,10 +2147,10 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
 
             if last_user_idx is not None:
                 raw_content = messages[last_user_idx]["content"]
-                if config.media.enabled:
-                    together_key = config.api_keys.get("together")
+                if request_config.media.enabled:
+                    together_key = request_config.api_keys.get("together")
                     processed_text, _ = await process_multimodal_content(
-                        raw_content, config.media, fallback_key=together_key
+                        raw_content, request_config.media, fallback_key=together_key
                     )
                     user_query = processed_text[:500]
                     messages[last_user_idx]["content"] = processed_text
@@ -1790,7 +2163,8 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
             decision = await choose_request_model(
                 payload,
                 messages,
-                websocket.headers.get(config.session_routing.trusted_session_header),
+                websocket.headers.get(request_config.session_routing.trusted_session_header),
+                bundle,
                 judge_observer=record_ws_judge,
             )
             selected_model = decision.selected_model
@@ -1801,7 +2175,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
             content_buffer = ""
             buffered_chunks = []
 
-            stream_gen = await backend.call(
+            stream_gen = await request_backend.call(
                 selected_model, messages, payload.max_tokens,
                 payload.temperature,
                 stream=True,
@@ -1814,7 +2188,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                 chunk_usage = _stream_usage(chunk)
                 if chunk_usage is not None:
                     latest_usage = chunk_usage
-                if not config.show_model_prefix:
+                if not request_config.show_model_prefix:
                     await send_ws_text(chunk)
                     continue
 
@@ -1884,8 +2258,8 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
             _safe_log("[WS] Client disconnected")
             record_ws_completed("disconnected", error_category="client_disconnect")
         except Exception as e:
-            if route_cache and config.session_routing.rejudge_on_backend_error:
-                route_cache.invalidate(session_key)
+            if request_route_cache and request_config.session_routing.rejudge_on_backend_error:
+                request_route_cache.invalidate(session_key)
             _safe_log(f"[WS Error] type={type(e).__name__}")
             record_ws_completed("error", error_category=_error_category(e))
             try:

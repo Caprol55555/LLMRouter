@@ -60,6 +60,8 @@ button.danger { color: #fecdd3; background: #3b1620; border: 1px solid #7f1d33; 
 .diff-list article > div { display: grid; grid-template-columns: 55px 1fr; gap: .5rem; align-items: start; }
 .diff-list span { color: #8996a6; font-size: .72rem; padding-top: .5rem; }
 .compact-table { min-width: 720px; }
+.compact-actions { gap: .4rem; }
+.compact-actions button { padding: .45rem .65rem; font-size: .72rem; }
 .status.active, .status.ready, .status.success { color: #a7f3d0; }
 .status.pending, .status.editing { color: #fcd34d; }
 .audit-list { display: grid; gap: .7rem; }

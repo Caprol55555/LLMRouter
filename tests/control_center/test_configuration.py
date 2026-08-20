@@ -268,6 +268,96 @@ def test_optimistic_revision_and_finalized_draft_are_immutable(temp_data_dir: Pa
         service.delete_draft(draft["draft_id"], expected_revision=ready["revision"])
 
 
+def test_activation_switches_runtime_and_rollback_creates_new_version(
+    temp_data_dir: Path, monkeypatch
+):
+    monkeypatch.setenv("LLMROUTER_ADMIN_TOKEN", "admin-secret")
+    config = build_config(temp_data_dir)
+    app = create_app(config=config)
+    service = app.state.control_center.configuration
+    active = service.active_configuration()
+    draft = service.create_draft(release_notes="Use qwen by default")
+    snapshot = draft["snapshot"]
+    snapshot["router"]["default_model"] = "qwen"
+    updated = service.update_draft(
+        draft["draft_id"],
+        expected_revision=draft["revision"],
+        snapshot=snapshot,
+        release_notes="Use qwen by default",
+    )
+    ready = service.validate_draft(
+        draft["draft_id"], expected_revision=updated["revision"]
+    )
+    pending = service.finalize_draft(
+        draft["draft_id"], expected_revision=ready["revision"]
+    )
+
+    client = TestClient(app)
+    csrf = login(client)
+    response = client.post(
+        f"/admin/api/configuration/versions/{pending['version_id']}/activate",
+        headers=write_headers(csrf),
+        json={"expected_active_version_id": active["version_id"]},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["cache_clear_reason"] == "routing_semantics_changed"
+    assert app.state.runtime_bundle.version_id == pending["version_id"]
+    assert app.state.router.config.router.default_model == "qwen"
+    assert service.active_configuration()["version_id"] == pending["version_id"]
+
+    rolled_back = client.post(
+        f"/admin/api/configuration/versions/{active['version_id']}/rollback",
+        headers=write_headers(csrf),
+        json={"expected_active_version_id": pending["version_id"]},
+    )
+    assert rolled_back.status_code == 201, rolled_back.text
+    rollback_version = rolled_back.json()
+    assert rollback_version["version_number"] == 3
+    assert rollback_version["parent_version_id"] == pending["version_id"]
+    assert app.state.router.config.router.default_model == "glm"
+    assert service.active_configuration()["version_id"] == rollback_version["version_id"]
+
+
+def test_activation_rejects_stale_expected_version(temp_data_dir: Path, monkeypatch):
+    monkeypatch.setenv("LLMROUTER_ADMIN_TOKEN", "admin-secret")
+    config = build_config(temp_data_dir)
+    app = create_app(config=config)
+    service = app.state.control_center.configuration
+    draft = service.create_draft(release_notes="Pending")
+    ready = service.validate_draft(draft["draft_id"], expected_revision=draft["revision"])
+    pending = service.finalize_draft(draft["draft_id"], expected_revision=ready["revision"])
+    client = TestClient(app)
+    csrf = login(client)
+    response = client.post(
+        f"/admin/api/configuration/versions/{pending['version_id']}/activate",
+        headers=write_headers(csrf),
+        json={"expected_active_version_id": 999},
+    )
+    assert response.status_code == 409
+    assert service.active_configuration()["version_id"] == 1
+
+
+def test_route_lab_uses_ephemeral_admin_test_and_does_not_persist_text(
+    temp_data_dir: Path, monkeypatch
+):
+    monkeypatch.setenv("LLMROUTER_ADMIN_TOKEN", "admin-secret")
+    config = build_config(temp_data_dir)
+    config.router.strategy = "random"
+    client = TestClient(create_app(config=config))
+    csrf = login(client)
+    response = client.post(
+        "/admin/api/route-lab/evaluate",
+        headers=write_headers(csrf),
+        json={"text": "temporary route lab input"},
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()["result"]
+    assert payload["traffic_class"] == "admin_test"
+    assert payload["persisted"] is False
+    audit = client.get("/admin/api/audit", headers=ORIGIN)
+    assert "temporary route lab input" not in audit.text
+
+
 def test_configuration_api_requires_session_origin_and_csrf(temp_data_dir: Path, monkeypatch):
     monkeypatch.setenv("LLMROUTER_ADMIN_TOKEN", "admin-secret")
     config = build_config(temp_data_dir)
