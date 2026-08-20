@@ -9,6 +9,7 @@ on:
       - 'openclaw_router/**'
       - 'tests/test_openclaw_http_tool_calls.py'
       - 'tests/test_openclaw_session_routing.py'
+      - 'tests/test_openclaw_websocket_smoke.py'
       - 'tests/control_center/**'
       - 'control_center_ui/**'
       - 'requirements-server.txt'
@@ -21,6 +22,7 @@ on:
       - 'openclaw_router/**'
       - 'tests/test_openclaw_http_tool_calls.py'
       - 'tests/test_openclaw_session_routing.py'
+      - 'tests/test_openclaw_websocket_smoke.py'
       - 'tests/control_center/**'
       - 'control_center_ui/**'
       - 'requirements-server.txt'
@@ -63,6 +65,7 @@ jobs:
           pytest -q
           tests/test_openclaw_http_tool_calls.py
           tests/test_openclaw_session_routing.py
+          tests/test_openclaw_websocket_smoke.py
           tests/control_center
 
   image:

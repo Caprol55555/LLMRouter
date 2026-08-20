@@ -643,7 +643,7 @@ P6 chore(control-center): harden production delivery and operations
 - [x] 配置变更正确处理会话缓存；
 - [x] Route Lab 默认不保存输入；
 - [x] 9router 不可用不拖垮生产请求；
-- [ ] SSE、WebSocket、tool calls、usage 兼容（WebSocket 旧测试未配置 pytest 异步标记且未连接真实服务）；
+- [x] SSE、WebSocket、tool calls、usage 兼容（WebSocket 已有本地 fake-backend smoke；旧 localhost 脚本仍是部署级测试）；
 - [x] 数据迁移、保留、清理、备份、恢复可验证；
 - [ ] 生产镜像无 Node runtime、Torch、Gradio、ComfyUI（需 Docker/Linux smoke）；
 - [x] Control Center 关闭时保持现有轻量模式；
@@ -668,8 +668,8 @@ cloud/深圳机授权，当前不在本地仓库内执行：镜像构建与 SBOM
 
 未验证项明细：
 
-- P6 / P2：`tests/test_websocket.py` 是未标记的裸 async 脚本，当前只做静态审查，
-  未把它伪装成通过；
+- P6 / P2：`tests/test_websocket.py` 仍是未标记的裸 async 脚本，未作为通过证据；
+  应在真实部署环境中作为外部连接 smoke 使用。
 - P6：本机没有 Docker、Podman 或 WSL 发行版，无法证明 Linux 镜像、只读根文件系统、
   `/data` 挂载和运行时无 Node/Torch 的事实；
 - P7：没有深圳机或 cloud 仓库的当前授权和连接，未执行灰度、资源、Swap/OOM、部署或回滚。
