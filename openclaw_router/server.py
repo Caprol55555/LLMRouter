@@ -805,6 +805,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
         if control_center.telemetry is None:
             return False
         try:
+            values.setdefault("config_version_id", current_runtime().version_id)
             return control_center.record(
                 RoutingEvent.create(
                     request_id=request_id,
@@ -1604,9 +1605,32 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
         async def run_one(selected_version_id: Optional[int], selected_draft_id: Optional[str]) -> Dict[str, Any]:
             started = time.perf_counter()
             candidate = candidate_for(selected_version_id, selected_draft_id)
+            lab_request_id = uuid.uuid4().hex
+            emit_routing_event(
+                request_id=lab_request_id,
+                event_kind="request_started",
+                transport="http",
+                requested_model="auto",
+                route_policy="route_lab",
+                config_version_id=candidate.version_id,
+            )
             payload = ChatRequest(model="auto", messages=[Message(role="user", content=text_value)])
             decision = await choose_request_model(payload, [{"role": "user", "content": text_value}], None, candidate)
             outcome = decision.judge_outcome
+            emit_routing_event(
+                request_id=lab_request_id,
+                event_kind="request_completed",
+                transport="http",
+                requested_model="auto",
+                route_policy="route_lab",
+                judge_status=outcome.status if outcome else "not_called",
+                selected_model=decision.selected_model,
+                final_status="success",
+                fallback=outcome.used_default if outcome else False,
+                judge_latency_ms=outcome.latency_ms if outcome else None,
+                total_latency_ms=(time.perf_counter() - started) * 1000,
+                config_version_id=candidate.version_id,
+            )
             return {
                 "version_id": candidate.version_id,
                 "version_number": candidate.version_number,
