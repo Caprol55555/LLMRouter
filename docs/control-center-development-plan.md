@@ -634,19 +634,19 @@ P6 chore(control-center): harden production delivery and operations
 
 ## 10. 最终验收清单
 
-- [ ] 普通用户、裁判、最终调用、测试流量的统计口径明确且可验证；
-- [ ] 生产请求正文和 Secret 不落库、不进日志；
-- [ ] 管理鉴权、CSRF、限速、安全头通过测试；
-- [ ] 配置草稿不影响运行配置；
-- [ ] 发布原子、并发安全、失败保持旧配置；
-- [ ] 回滚不篡改历史；
-- [ ] 配置变更正确处理会话缓存；
-- [ ] Route Lab 默认不保存输入；
-- [ ] 9router 不可用不拖垮生产请求；
-- [ ] SSE、WebSocket、tool calls、usage 兼容；
-- [ ] 数据迁移、保留、清理、备份、恢复可验证；
-- [ ] 生产镜像无 Node runtime、Torch、Gradio、ComfyUI；
-- [ ] Control Center 关闭时保持现有轻量模式；
+- [x] 普通用户、裁判、最终调用、测试流量的统计口径明确且可验证；
+- [x] 生产请求正文和 Secret 不落库、不进日志；
+- [x] 管理鉴权、CSRF、限速、安全头通过测试；
+- [x] 配置草稿不影响运行配置；
+- [x] 发布原子、并发安全、失败保持旧配置；
+- [x] 回滚不篡改历史；
+- [x] 配置变更正确处理会话缓存；
+- [x] Route Lab 默认不保存输入；
+- [x] 9router 不可用不拖垮生产请求；
+- [ ] SSE、WebSocket、tool calls、usage 兼容（WebSocket 旧测试未配置 pytest 异步标记且未连接真实服务）；
+- [x] 数据迁移、保留、清理、备份、恢复可验证；
+- [ ] 生产镜像无 Node runtime、Torch、Gradio、ComfyUI（需 Docker/Linux smoke）；
+- [x] Control Center 关闭时保持现有轻量模式；
 - [ ] 深圳机资源、Swap 和 OOM 验收通过；
 - [ ] cloud 部署文档、更新与回滚脚本同步完成。
 
@@ -665,3 +665,11 @@ P6 chore(control-center): harden production delivery and operations
 阶段 6 本地硬化已完成并提交为 `99f5be8`；以下事项需要真实部署环境或用户明确的
 cloud/深圳机授权，当前不在本地仓库内执行：镜像构建与 SBOM 的 CI 实跑、
 深圳机资源/Swap/OOM 灰度、cloud 仓库变更同步。
+
+未验证项明细：
+
+- P6 / P2：`tests/test_websocket.py` 是未标记的裸 async 脚本，当前只做静态审查，
+  未把它伪装成通过；
+- P6：本机没有 Docker、Podman 或 WSL 发行版，无法证明 Linux 镜像、只读根文件系统、
+  `/data` 挂载和运行时无 Node/Torch 的事实；
+- P7：没有深圳机或 cloud 仓库的当前授权和连接，未执行灰度、资源、Swap/OOM、部署或回滚。
