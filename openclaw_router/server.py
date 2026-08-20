@@ -50,6 +50,13 @@ try:
     from .control_center.runtime import ControlCenterRuntime
     from .control_center.status import admin_api_status
     from .control_center.telemetry import RoutingEvent
+    from .control_center.configuration import (
+        ConfigurationConflict,
+        ConfigurationError,
+        ConfigurationNotFound,
+        DraftValidationError,
+        SnapshotStructureError,
+    )
 except ImportError:
     from config import OpenClawConfig, LLMConfig, MODELS_WITHOUT_SYSTEM_ROLE, MODEL_CONTEXT_LIMITS
     from routers import JudgeOutcome, OpenClawRouter, _safe_log
@@ -64,6 +71,13 @@ except ImportError:
     from control_center.runtime import ControlCenterRuntime
     from control_center.status import admin_api_status
     from control_center.telemetry import RoutingEvent
+    from control_center.configuration import (
+        ConfigurationConflict,
+        ConfigurationError,
+        ConfigurationNotFound,
+        DraftValidationError,
+        SnapshotStructureError,
+    )
 
 
 # ============================================================
@@ -579,7 +593,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
 
     # Initialize Control Center in a failure-isolated way. When disabled, this only
     # creates a lightweight runtime object and never touches the database or data_dir.
-    control_center = ControlCenterRuntime(config.control_center)
+    control_center = ControlCenterRuntime(config.control_center, application_config=config)
     control_center.initialize()
     app.state.control_center = control_center
     dashboard_dir = Path(
@@ -638,6 +652,28 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
     @app.exception_handler(AdminAccessError)
     async def handle_admin_access_error(_request: Request, exc: AdminAccessError):
         return admin_error(exc.status_code, exc.code, exc.message)
+
+    @app.exception_handler(ConfigurationError)
+    async def handle_configuration_error(_request: Request, exc: ConfigurationError):
+        if isinstance(exc, ConfigurationNotFound):
+            return admin_error(404, "configuration_not_found", "Configuration resource was not found")
+        if isinstance(exc, ConfigurationConflict):
+            return admin_error(409, "configuration_conflict", str(exc))
+        if isinstance(exc, DraftValidationError):
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "error": {
+                        "code": "configuration_invalid",
+                        "message": "Configuration validation failed",
+                    },
+                    "issues": [issue.as_dict() for issue in exc.issues],
+                },
+                headers={"Cache-Control": "no-store"},
+            )
+        if isinstance(exc, SnapshotStructureError):
+            return admin_error(422, "configuration_structure_invalid", str(exc))
+        return admin_error(503, "configuration_unavailable", "Configuration storage is unavailable")
 
     def local_origin_allowed(request: Request) -> bool:
         origin = request.headers.get("origin", "")
@@ -703,6 +739,71 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                 "admin_unauthorized",
                 "Administrator session is required",
             )
+
+    async def read_admin_json(request: Request, *, maximum_bytes: int = 262_144) -> Any:
+        content_length = request.headers.get("content-length")
+        if content_length and (
+            not content_length.isdigit() or int(content_length) > maximum_bytes
+        ):
+            raise AdminAccessError(413, "request_too_large", "Request body is too large")
+        raw_body = bytearray()
+        async for chunk in request.stream():
+            raw_body.extend(chunk)
+            if len(raw_body) > maximum_bytes:
+                raise AdminAccessError(413, "request_too_large", "Request body is too large")
+        try:
+            return json.loads(raw_body)
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+            raise SnapshotStructureError("Request body must contain valid JSON") from None
+
+    def strict_object(
+        value: Any,
+        *,
+        allowed: set[str],
+        required: set[str],
+    ) -> Dict[str, Any]:
+        if not isinstance(value, dict):
+            raise SnapshotStructureError("Request body must be an object")
+        unknown = sorted(set(value) - allowed)
+        missing = sorted(required - set(value))
+        if unknown:
+            raise SnapshotStructureError(
+                "Request body contains unknown fields: " + ", ".join(unknown)
+            )
+        if missing:
+            raise SnapshotStructureError(
+                "Request body is missing fields: " + ", ".join(missing)
+            )
+        return value
+
+    def configuration_service():
+        service = control_center.configuration
+        if service is None:
+            raise ConfigurationError("Configuration service is unavailable")
+        return service
+
+    def record_admin_audit(
+        action: str,
+        outcome: str,
+        *,
+        subject_type: Optional[str] = None,
+        subject_id: Optional[str] = None,
+        summary: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        service = control_center.configuration
+        if service is None:
+            return
+        try:
+            service.record_audit(
+                action=action,
+                outcome=outcome,
+                subject_type=subject_type,
+                subject_id=subject_id,
+                summary=summary,
+            )
+        except Exception:
+            # Audit failure must not reveal details or change authentication behavior.
+            return
 
     @app.middleware("http")
     async def admin_security_headers(request: Request, call_next):
@@ -833,6 +934,10 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
         prefix="/admin/api",
         dependencies=[Depends(require_admin_session)],
     )
+    protected_admin_write = APIRouter(
+        prefix="/admin/api",
+        dependencies=[Depends(require_admin_session), Depends(require_admin_write)],
+    )
 
     @app.post("/admin/api/login", include_in_schema=False)
     async def admin_login(request: Request):
@@ -840,19 +945,25 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
             return await admin_api_status(request)
         auth = control_center.admin_auth
         if auth is None or not auth.configured:
+            record_admin_audit("login", "failure", summary={"reason": "auth_unavailable"})
             return admin_error(503, "admin_auth_unavailable", "Administrator login is unavailable")
         if not local_origin_allowed(request):
+            record_admin_audit("login", "denied", summary={"reason": "invalid_origin"})
             return admin_error(403, "invalid_origin", "Request origin is not allowed")
         content_length = request.headers.get("content-length")
         if content_length and (
             not content_length.isdigit() or int(content_length) > 8192
         ):
+            record_admin_audit("login", "failure", summary={"reason": "request_too_large"})
             return admin_error(413, "request_too_large", "Login request is too large")
         try:
             raw_body = bytearray()
             async for chunk in request.stream():
                 raw_body.extend(chunk)
                 if len(raw_body) > 8192:
+                    record_admin_audit(
+                        "login", "failure", summary={"reason": "request_too_large"}
+                    )
                     return admin_error(413, "request_too_large", "Login request is too large")
             body = json.loads(raw_body)
         except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
@@ -866,6 +977,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
         client_key = request.client.host if request.client else "unknown"
         session, result = auth.login(candidate, client_key)
         if session is None:
+            record_admin_audit("login", "failure", summary={"reason": result})
             status_code = 429 if result == "rate_limited" else 401
             response = admin_error(
                 status_code,
@@ -875,6 +987,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
             if status_code == 429:
                 response.headers["Retry-After"] = str(auth.login_window_seconds)
             return response
+        record_admin_audit("login", "success")
         response = JSONResponse(
             {
                 "status": "ok",
@@ -909,15 +1022,12 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
             headers={"Cache-Control": "no-store"},
         )
 
-    @protected_admin.post(
-        "/logout",
-        dependencies=[Depends(require_admin_write)],
-        include_in_schema=False,
-    )
+    @protected_admin_write.post("/logout", include_in_schema=False)
     async def admin_logout(request: Request):
         auth = control_center.admin_auth
         assert auth is not None
         auth.logout(request.cookies.get(auth.COOKIE_NAME))
+        record_admin_audit("logout", "success")
         response = JSONResponse({"status": "ok"}, headers={"Cache-Control": "no-store"})
         response.delete_cookie(auth.COOKIE_NAME, path="/admin", samesite="strict")
         return response
@@ -979,6 +1089,11 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
 
     @protected_admin.get("/runtime", include_in_schema=False)
     async def admin_runtime():
+        active = (
+            control_center.configuration.active_configuration()
+            if control_center.configuration is not None
+            else None
+        )
         return JSONResponse(
             {
                 "strategy": config.router.strategy,
@@ -989,11 +1104,168 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                 "session_cache_entries": route_cache.size if route_cache else 0,
                 "commit": os.getenv("LLMROUTER_COMMIT_SHA", "unknown"),
                 "schema_version": control_center.schema_version,
+                "config_version_id": active["version_id"] if active else None,
+                "config_version_number": active["version_number"] if active else None,
             },
             headers={"Cache-Control": "no-store"},
         )
 
+    @protected_admin.get("/configuration", include_in_schema=False)
+    async def admin_configuration():
+        service = configuration_service()
+        return JSONResponse(
+            {
+                "schema_version": 1,
+                "active": service.active_configuration(),
+                "read_only": service.read_only_metadata(),
+                "drafts": service.list_drafts(),
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @protected_admin.get("/configuration/versions", include_in_schema=False)
+    async def admin_configuration_versions(page: int = 1, page_size: int = 25):
+        return JSONResponse(
+            configuration_service().list_versions(page=page, page_size=page_size),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @protected_admin.get(
+        "/configuration/versions/{version_id}", include_in_schema=False
+    )
+    async def admin_configuration_version(version_id: int):
+        return JSONResponse(
+            configuration_service().get_version(version_id),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @protected_admin.get("/configuration/drafts", include_in_schema=False)
+    async def admin_configuration_drafts():
+        return JSONResponse(
+            {"items": configuration_service().list_drafts()},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @protected_admin.get(
+        "/configuration/drafts/{draft_id}", include_in_schema=False
+    )
+    async def admin_configuration_draft(draft_id: str):
+        return JSONResponse(
+            configuration_service().get_draft(draft_id),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @protected_admin.get(
+        "/configuration/drafts/{draft_id}/diff", include_in_schema=False
+    )
+    async def admin_configuration_draft_diff(draft_id: str):
+        return JSONResponse(
+            configuration_service().draft_diff(draft_id),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @protected_admin.get("/audit", include_in_schema=False)
+    async def admin_audit(page: int = 1, page_size: int = 50):
+        return JSONResponse(
+            configuration_service().list_audit(page=page, page_size=page_size),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @protected_admin_write.post("/configuration/drafts", include_in_schema=False)
+    async def create_configuration_draft(request: Request):
+        body = strict_object(
+            await read_admin_json(request),
+            allowed={"base_version_id", "release_notes"},
+            required=set(),
+        )
+        base_version_id = body.get("base_version_id")
+        if base_version_id is not None and (
+            isinstance(base_version_id, bool) or not isinstance(base_version_id, int)
+        ):
+            raise SnapshotStructureError("base_version_id must be an integer")
+        return JSONResponse(
+            configuration_service().create_draft(
+                base_version_id=base_version_id,
+                release_notes=body.get("release_notes", ""),
+            ),
+            status_code=201,
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @protected_admin_write.put(
+        "/configuration/drafts/{draft_id}", include_in_schema=False
+    )
+    async def update_configuration_draft(draft_id: str, request: Request):
+        body = strict_object(
+            await read_admin_json(request),
+            allowed={"revision", "snapshot", "release_notes"},
+            required={"revision", "snapshot", "release_notes"},
+        )
+        revision = body["revision"]
+        if isinstance(revision, bool) or not isinstance(revision, int):
+            raise SnapshotStructureError("revision must be an integer")
+        return JSONResponse(
+            configuration_service().update_draft(
+                draft_id,
+                expected_revision=revision,
+                snapshot=body["snapshot"],
+                release_notes=body["release_notes"],
+            ),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @protected_admin_write.post(
+        "/configuration/drafts/{draft_id}/validate", include_in_schema=False
+    )
+    async def validate_configuration_draft(draft_id: str, request: Request):
+        body = strict_object(
+            await read_admin_json(request),
+            allowed={"revision"},
+            required={"revision"},
+        )
+        revision = body["revision"]
+        if isinstance(revision, bool) or not isinstance(revision, int):
+            raise SnapshotStructureError("revision must be an integer")
+        return JSONResponse(
+            configuration_service().validate_draft(
+                draft_id, expected_revision=revision
+            ),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @protected_admin_write.post(
+        "/configuration/drafts/{draft_id}/finalize", include_in_schema=False
+    )
+    async def finalize_configuration_draft(draft_id: str, request: Request):
+        body = strict_object(
+            await read_admin_json(request),
+            allowed={"revision"},
+            required={"revision"},
+        )
+        revision = body["revision"]
+        if isinstance(revision, bool) or not isinstance(revision, int):
+            raise SnapshotStructureError("revision must be an integer")
+        return JSONResponse(
+            configuration_service().finalize_draft(
+                draft_id, expected_revision=revision
+            ),
+            status_code=201,
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @protected_admin_write.delete(
+        "/configuration/drafts/{draft_id}", include_in_schema=False
+    )
+    async def delete_configuration_draft(draft_id: str, revision: int):
+        configuration_service().delete_draft(
+            draft_id, expected_revision=revision
+        )
+        return JSONResponse(
+            {"status": "ok"}, headers={"Cache-Control": "no-store"}
+        )
+
     app.include_router(protected_admin)
+    app.include_router(protected_admin_write)
 
     @app.get("/v1/models")
     async def list_models():

@@ -341,3 +341,75 @@ MIGRATIONS.append(
         ),
     )
 )
+
+
+MIGRATIONS.append(
+    Migration(
+        version=2,
+        name="create_configuration_versions_drafts_and_audit",
+        statements=(
+            """
+            CREATE TABLE configuration_versions (
+                version_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                version_number INTEGER NOT NULL UNIQUE CHECK (version_number >= 1),
+                parent_version_id INTEGER REFERENCES configuration_versions(version_id),
+                source TEXT NOT NULL CHECK (source IN ('yaml_baseline', 'draft')),
+                snapshot_json TEXT NOT NULL,
+                checksum TEXT NOT NULL,
+                release_notes TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TRIGGER configuration_versions_immutable_update
+            BEFORE UPDATE ON configuration_versions
+            BEGIN
+                SELECT RAISE(ABORT, 'configuration versions are immutable');
+            END
+            """,
+            """
+            CREATE TRIGGER configuration_versions_immutable_delete
+            BEFORE DELETE ON configuration_versions
+            BEGIN
+                SELECT RAISE(ABORT, 'configuration versions are immutable');
+            END
+            """,
+            """
+            CREATE TABLE configuration_state (
+                singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                active_version_id INTEGER NOT NULL REFERENCES configuration_versions(version_id),
+                initialized_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE configuration_drafts (
+                draft_id TEXT PRIMARY KEY,
+                base_version_id INTEGER NOT NULL REFERENCES configuration_versions(version_id),
+                finalized_version_id INTEGER REFERENCES configuration_versions(version_id),
+                status TEXT NOT NULL CHECK (status IN ('editing', 'ready', 'finalized')),
+                revision INTEGER NOT NULL CHECK (revision >= 1),
+                snapshot_json TEXT NOT NULL,
+                checksum TEXT NOT NULL,
+                validation_json TEXT NOT NULL DEFAULT '[]',
+                release_notes TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX idx_configuration_drafts_updated ON configuration_drafts(updated_at DESC)",
+            """
+            CREATE TABLE admin_audit_events (
+                audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                occurred_at TEXT NOT NULL,
+                action TEXT NOT NULL,
+                outcome TEXT NOT NULL CHECK (outcome IN ('success', 'failure', 'denied')),
+                subject_type TEXT,
+                subject_id TEXT,
+                summary_json TEXT NOT NULL DEFAULT '{}'
+            )
+            """,
+            "CREATE INDEX idx_admin_audit_events_time ON admin_audit_events(occurred_at DESC, audit_id DESC)",
+        ),
+    )
+)

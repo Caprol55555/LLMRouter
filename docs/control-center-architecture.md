@@ -1,6 +1,6 @@
 # LLMRouter Control Center Architecture Boundaries
 
-> Phase: 0–2 (control-plane skeleton, telemetry, and read-only dashboard)
+> Phase: 0–3 (control-plane skeleton, telemetry, dashboard, and configuration drafts)
 > Date: 2026-08-20
 
 ## Purpose
@@ -107,12 +107,43 @@ a protected router and require the dedicated administrator session. Login and
 logout remain explicit public/session-lifecycle routes; logout additionally
 requires exact loopback Origin matching and a CSRF token.
 
-## What is intentionally absent through phase 2
+## Phase 3 configuration boundary
 
-No configuration drafts, snapshots, diff, publish, hot update, rollback,
-`RuntimeSnapshot`, Route Lab, A/B testing, test sets, export, 9router
-`/v1/models` calls, or phase 3–5 business tables. Phase 2 adds only an
-authenticated read-only Dashboard and management API.
+Phase 3 adds an authenticated configuration repository and editor without
+changing the inference runtime:
+
+- YAML is imported exactly once as immutable configuration version 1 when the
+  database has no active pointer. Later YAML changes do not silently overwrite
+  the database baseline.
+- Only the managed routing subset is persisted: judge/default/allowed models,
+  judge limits and prompt, session routing policy, and existing backend model
+  IDs, descriptions, token budgets, and context limits.
+- Providers, outbound URLs, listener settings, paths, and credential values are
+  never editable. Credential metadata may expose a validated environment
+  variable name and whether it is configured, never its value.
+- Snapshot schemas are closed. Unknown fields, environment references in
+  editable text, and high-confidence secret formats are rejected before a
+  draft is stored.
+- Model validation rejects router-internal `auto`, `auto:*`, and `lr/*` IDs,
+  server-forbidden models and prefixes, unknown aliases, invalid default or
+  allowlist relationships, and token/context inconsistencies.
+- Draft writes use optimistic integer revisions. Validation records stable,
+  path-addressed issues. Only a ready draft with non-empty release notes can be
+  finalized.
+- Finalization creates a new immutable version with `publish_state: pending`.
+  It does not update `configuration_state.active_version_id`, the in-memory
+  router, or session caches.
+- The Dashboard offers structured editing, a read-only managed YAML view,
+  stable diff, version history, and sanitized management audit summaries.
+
+See `docs/adr-002-configuration-drafts-and-version-history.md` for lifecycle and
+storage decisions.
+
+## What is intentionally absent through phase 3
+
+No publish or activation endpoint, hot update, runtime snapshot switching,
+cache invalidation, rollback, Route Lab, A/B testing, test sets, export, or
+9router `/v1/models` discovery. Those remain phase 4–5 work.
 
 ## Migration rules
 

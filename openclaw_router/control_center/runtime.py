@@ -13,9 +13,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
-from ..config import ControlCenterConfig
+from ..config import ControlCenterConfig, OpenClawConfig
 from . import migrations
 from .auth import AdminAuthService
+from .configuration import ConfigurationService
 from .queries import TelemetryQueryService
 from .telemetry import RoutingEvent, TelemetryService
 
@@ -33,12 +34,14 @@ class ControlCenterRuntime:
     """Thin runtime handle for the Control Center control plane."""
 
     config: ControlCenterConfig
+    application_config: Optional[OpenClawConfig] = None
     state: ControlCenterState = ControlCenterState.DISABLED
     schema_version: Optional[int] = None
     last_error: Optional[str] = None
     telemetry: Optional[TelemetryService] = None
     queries: Optional[TelemetryQueryService] = None
     admin_auth: Optional[AdminAuthService] = None
+    configuration: Optional[ConfigurationService] = None
 
     @classmethod
     def disabled(cls) -> "ControlCenterRuntime":
@@ -68,13 +71,26 @@ class ControlCenterRuntime:
             self.schema_version = migrations.migrate(self.config.db_path)
             self.telemetry = TelemetryService(self.config, self.config.db_path)
             self.queries = TelemetryQueryService(self.config.db_path)
+            if self.application_config is not None:
+                self.configuration = ConfigurationService(
+                    self.application_config,
+                    self.config.db_path,
+                )
+                self.configuration.initialize_baseline()
             self.state = ControlCenterState.OK
             self.last_error = None
         except Exception as exc:  # pragma: no cover - failure isolation path
+            telemetry = self.telemetry
+            if telemetry is not None:
+                try:
+                    telemetry.stop(timeout=0.5)
+                except Exception:
+                    pass
             self.state = ControlCenterState.DEGRADED
             self.schema_version = None
             self.telemetry = None
             self.queries = None
+            self.configuration = None
             self.last_error = "Control Center database initialization failed"
             logger.error("Control Center initialization failed: %s", type(exc).__name__)
 

@@ -22,7 +22,7 @@ from openclaw_router.config import (
     RouterConfig,
     SessionRoutingConfig,
 )
-from openclaw_router.control_center.migrations import Database, migrate
+from openclaw_router.control_center.migrations import MIGRATIONS, Database, migrate
 from openclaw_router.control_center.queries import TelemetryQueryService
 from openclaw_router.control_center.telemetry import RoutingEvent, TelemetryService
 from openclaw_router.server import create_app
@@ -225,7 +225,7 @@ def test_event_schema_excludes_sensitive_content():
 
 def test_migration_v1_query_and_hourly_aggregate(temp_data_dir: Path):
     db_path = temp_data_dir / "control-center.db"
-    assert migrate(str(db_path)) == 1
+    assert migrate(str(db_path), migrations=MIGRATIONS[:2]) == 1
     service = TelemetryService(
         ControlCenterConfig(
             enabled=True,

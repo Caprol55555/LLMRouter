@@ -1,5 +1,7 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { ApiError, api } from "./api";
+import { ConfigurationPage } from "./configuration";
 import "./styles.css";
 
 type WindowSummary = {
@@ -42,29 +44,14 @@ type Runtime = {
   session_cache_entries: number;
   commit: string;
   schema_version: number | null;
+  config_version_id: number | null;
+  config_version_number: number | null;
 };
 type Health = {
   status: string;
   database: { status: string; schema_version: number | null };
   telemetry?: { status: string; dropped_events: number; database_errors: number; queue_depth: number };
 };
-
-class ApiError extends Error {
-  status: number;
-  constructor(status: number, message: string) {
-    super(message);
-    this.status = status;
-  }
-}
-
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, { credentials: "same-origin", ...init });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new ApiError(response.status, body?.error?.message || `Request failed (${response.status})`);
-  }
-  return body as T;
-}
 
 function fmtNumber(value: number | null, suffix = "") {
   return value == null ? "—" : `${value.toFixed(value >= 100 ? 0 : 1)}${suffix}`;
@@ -88,6 +75,7 @@ export function App() {
   const [selectedModel, setSelectedModel] = useState("");
   const [finalStatus, setFinalStatus] = useState("");
   const [requestWindow, setRequestWindow] = useState<"1h" | "24h" | "7d">("24h");
+  const [section, setSection] = useState<"overview" | "configuration">("overview");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -155,6 +143,7 @@ export function App() {
     setAuthenticated(false);
     setOverview(null);
     setRequests(null);
+    setSection("overview");
   }
 
   const summary = overview?.windows[windowKey];
@@ -202,14 +191,22 @@ export function App() {
       </header>
 
       {error && <div className="error" role="alert">{error}</div>}
-      <nav aria-label="Metric window">
-        {(["1h", "24h", "7d"] as const).map((item) => (
-          <button key={item} className={windowKey === item ? "active" : "secondary"} onClick={() => setWindowKey(item)}>{item}</button>
-        ))}
+      <nav className="primary-nav" aria-label="Control Center sections">
+        <button className={section === "overview" ? "active" : "secondary"} onClick={() => setSection("overview")}>Overview</button>
+        <button className={section === "configuration" ? "active" : "secondary"} onClick={() => setSection("configuration")}>Configuration</button>
       </nav>
 
-      {loading && !overview ? <div className="state">Loading telemetry…</div> : summary && (
+      {section === "configuration" ? (
+        <ConfigurationPage csrf={csrf} onUnauthorized={() => setAuthenticated(false)} />
+      ) : (
         <>
+          <nav aria-label="Metric window">
+            {(["1h", "24h", "7d"] as const).map((item) => (
+              <button key={item} className={windowKey === item ? "active" : "secondary"} onClick={() => setWindowKey(item)}>{item}</button>
+            ))}
+          </nav>
+          {loading && !overview ? <div className="state">Loading telemetry…</div> : summary && (
+            <>
           <section className="cards" aria-label="Overview metrics">
             <Metric label="Outer requests" value={String(summary.request_count)} />
             <Metric label="Judge calls" value={`${summary.judge_calls} · ${summary.judge_amplification.toFixed(2)}×`} />
@@ -230,10 +227,10 @@ export function App() {
               </div>
             ))}
           </section>
-        </>
-      )}
+            </>
+          )}
 
-      <section className="panel">
+          <section className="panel">
         <div className="panel-title"><h2>Requests</h2><span>Structured metadata only</span></div>
         <div className="filters">
           <select aria-label="Request time window" value={requestWindow} onChange={(event) => { setPage(1); setRequestWindow(event.target.value as "1h" | "24h" | "7d"); }}>
@@ -264,7 +261,9 @@ export function App() {
           </tbody></table></div>
         )}
         <div className="pagination"><button className="secondary" disabled={!requests || page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>Previous</button><span>Page {page} · {requests?.total ?? 0} requests</span><button className="secondary" disabled={!requests || page * requests.page_size >= requests.total} onClick={() => setPage((value) => value + 1)}>Next</button></div>
-      </section>
+          </section>
+        </>
+      )}
     </main>
   );
 }
