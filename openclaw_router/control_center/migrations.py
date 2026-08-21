@@ -426,3 +426,19 @@ MIGRATIONS.append(
         ),
     )
 )
+
+MIGRATIONS.append(
+    Migration(
+        version=4,
+        name="persist_admin_credentials",
+        statements=(
+            """
+            CREATE TABLE admin_credentials (
+                credential_id INTEGER PRIMARY KEY CHECK (credential_id = 1),
+                password_digest TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+        ),
+    )
+)

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import secrets
+import sqlite3
 import threading
 import time
 from collections import OrderedDict, deque
@@ -45,9 +47,11 @@ class AdminAuthService:
         login_max_attempts: int,
         max_active_sessions: int = DEFAULT_MAX_ACTIVE_SESSIONS,
         max_tracked_clients: int = DEFAULT_MAX_TRACKED_CLIENTS,
+        db_path: Optional[str] = None,
         clock=time.monotonic,
     ):
-        self._admin_token_digest = _digest(admin_token) if admin_token else ""
+        self._db_path = db_path
+        self._admin_token_digest = self._load_or_initialize_digest(admin_token)
         self.session_ttl_seconds = session_ttl_seconds
         self.login_window_seconds = login_window_seconds
         self.login_max_attempts = login_max_attempts
@@ -63,15 +67,59 @@ class AdminAuthService:
         return bool(self._admin_token_digest)
 
     def change_token(self, current: str, new: str) -> bool:
-        """Replace the administrator token for the current process."""
+        """Replace and persist the administrator token."""
         if not isinstance(current, str) or not isinstance(new, str) or not (1 <= len(new) <= 4096):
             return False
         with self._lock:
             if not self._admin_token_digest or not hmac.compare_digest(_digest(current), self._admin_token_digest):
                 return False
-            self._admin_token_digest = _digest(new)
+            new_digest = _digest(new)
+            if self._db_path and not self._persist_digest(new_digest):
+                return False
+            self._admin_token_digest = new_digest
             self._sessions.clear()
             return True
+
+    def _load_or_initialize_digest(self, admin_token: Optional[str]) -> str:
+        fallback = _digest(admin_token) if admin_token else ""
+        if not self._db_path or not os.path.exists(self._db_path):
+            return fallback
+        try:
+            with sqlite3.connect(self._db_path, timeout=5.0) as connection:
+                row = connection.execute(
+                    "SELECT password_digest FROM admin_credentials WHERE credential_id = 1"
+                ).fetchone()
+                if row and row[0]:
+                    return str(row[0])
+                if fallback:
+                    connection.execute(
+                        "INSERT INTO admin_credentials (credential_id, password_digest, updated_at) "
+                        "VALUES (1, ?, datetime('now'))",
+                        (fallback,),
+                    )
+                    connection.commit()
+        except sqlite3.Error:
+            return fallback
+        return fallback
+
+    def _persist_digest(self, digest: str) -> bool:
+        try:
+            with sqlite3.connect(self._db_path, timeout=5.0) as connection:
+                updated = connection.execute(
+                    "UPDATE admin_credentials SET password_digest = ?, updated_at = datetime('now') "
+                    "WHERE credential_id = 1",
+                    (digest,),
+                ).rowcount
+                if updated == 0:
+                    connection.execute(
+                        "INSERT INTO admin_credentials (credential_id, password_digest, updated_at) "
+                        "VALUES (1, ?, datetime('now'))",
+                        (digest,),
+                    )
+                connection.commit()
+            return True
+        except sqlite3.Error:
+            return False
 
     def login(self, candidate: str, client_key: str) -> tuple[Optional[AdminSession], str]:
         now = self._clock()

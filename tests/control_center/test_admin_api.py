@@ -102,6 +102,24 @@ def test_missing_admin_token_fails_closed(temp_data_dir: Path, monkeypatch):
     assert client.get("/admin/api/overview").status_code == 401
 
 
+def test_password_change_survives_runtime_restart(temp_data_dir: Path, monkeypatch):
+    monkeypatch.setenv("LLMROUTER_ADMIN_TOKEN", "admin-secret")
+    first = TestClient(create_app(config=build_config(temp_data_dir)))
+    assert login(first).status_code == 200
+    session = first.get("/admin/api/session", headers=ORIGIN)
+    csrf = session.json()["csrf_token"]
+    changed = first.post(
+        "/admin/api/password",
+        headers={**ORIGIN, "X-CSRF-Token": csrf},
+        json={"current_password": "admin-secret", "new_password": "persisted-secret"},
+    )
+    assert changed.status_code == 200
+
+    second = TestClient(create_app(config=build_config(temp_data_dir)))
+    assert login(second, "admin-secret").status_code == 401
+    assert login(second, "persisted-secret").status_code == 200
+
+
 def test_login_cookie_origin_rate_limit_and_uniform_failure(temp_data_dir: Path, monkeypatch):
     monkeypatch.setenv("LLMROUTER_ADMIN_TOKEN", "admin-secret")
     client = TestClient(create_app(config=build_config(temp_data_dir, attempts=2)))

@@ -60,6 +60,9 @@ class ControlCenterRuntime:
             self.state = ControlCenterState.DISABLED
             return
 
+        # Keep authentication available even when database initialization is
+        # degraded, matching the control center's existing fail-open-to-status
+        # behavior. A database-backed instance replaces this after migration.
         self.admin_auth = AdminAuthService(
             os.getenv("LLMROUTER_ADMIN_TOKEN"),
             session_ttl_seconds=self.config.admin_session_ttl_seconds,
@@ -69,6 +72,13 @@ class ControlCenterRuntime:
         try:
             self.config.validate()
             self.schema_version = migrations.migrate(self.config.db_path)
+            self.admin_auth = AdminAuthService(
+                os.getenv("LLMROUTER_ADMIN_TOKEN"),
+                db_path=self.config.db_path,
+                session_ttl_seconds=self.config.admin_session_ttl_seconds,
+                login_window_seconds=self.config.admin_login_window_seconds,
+                login_max_attempts=self.config.admin_login_max_attempts,
+            )
             self.telemetry = TelemetryService(self.config, self.config.db_path)
             self.queries = TelemetryQueryService(self.config.db_path)
             if self.application_config is not None:
