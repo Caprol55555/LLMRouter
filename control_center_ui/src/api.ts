@@ -21,7 +21,7 @@ function translateApiMessage(message: string): string {
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, { credentials: "same-origin", ...init });
+  const response = await fetch(path, { credentials: "same-origin", cache: "no-store", ...init });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new ApiError(

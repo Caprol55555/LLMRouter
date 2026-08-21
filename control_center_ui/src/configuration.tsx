@@ -121,10 +121,6 @@ type DiscoveryResult = {
   reason?: string;
   combo_internal_recursion_checked?: boolean;
 };
-type DraftDiff = {
-  changes: Array<{ path: string; before: unknown; after: unknown }>;
-};
-
 function translateStatus(value: string | null | undefined): string {
   const labels: Record<string, string> = {
     editing: "编辑中",
@@ -206,44 +202,6 @@ function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-function scalar(value: unknown): string {
-  if (value === null) return "null";
-  if (typeof value === "string") return JSON.stringify(value);
-  return String(value);
-}
-
-function toYaml(value: unknown, indent = 0): string {
-  const padding = " ".repeat(indent);
-  if (Array.isArray(value)) {
-    if (!value.length) return `${padding}[]`;
-    return value.map((item) => `${padding}- ${scalar(item)}`).join("\n");
-  }
-  if (value && typeof value === "object") {
-    return Object.entries(value as Record<string, unknown>)
-      .map(([key, item]) => {
-        if (item && typeof item === "object") {
-          return `${padding}${key}:\n${toYaml(item, indent + 2)}`;
-        }
-        if (typeof item === "string" && item.includes("\n")) {
-          const block = item
-            .split("\n")
-            .map((line) => `${" ".repeat(indent + 2)}${line}`)
-            .join("\n");
-          return `${padding}${key}: |-\n${block}`;
-        }
-        return `${padding}${key}: ${scalar(item)}`;
-      })
-      .join("\n");
-  }
-  return `${padding}${scalar(value)}`;
-}
-
-function formatValue(value: unknown): string {
-  if (value === undefined) return "—";
-  if (typeof value === "string") return value;
-  return JSON.stringify(value);
-}
-
 export function ConfigurationPage({
   csrf,
   onUnauthorized,
@@ -263,7 +221,6 @@ export function ConfigurationPage({
   const [draftName, setDraftName] = useState("");
   const [editable, setEditable] = useState<ManagedSnapshot | null>(null);
   const [releaseNotes, setReleaseNotes] = useState("");
-  const [diff, setDiff] = useState<DraftDiff | null>(null);
   const [loading, setLoading] = useState(true);
   const [draftLoading, setDraftLoading] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
@@ -305,11 +262,9 @@ export function ConfigurationPage({
         ? candidate
         : routes[0]?.draft_id || "";
       setSelectedId(nextSelected);
-      if (nextSelected) setEditorOpen(true);
       if (!nextSelected) {
         setDraft(null);
         setEditable(null);
-        setDiff(null);
       }
     } catch (reason) {
       handleError(reason);
@@ -323,17 +278,15 @@ export function ConfigurationPage({
     setDraftLoading(true);
     setError("");
     try {
-      const [nextDraft, nextDiff] = await Promise.all([
-        api<Draft>(`/admin/api/configuration/routes/${encodeURIComponent(draftId)}`),
-        api<DraftDiff>(
-          `/admin/api/configuration/routes/${encodeURIComponent(draftId)}/diff`,
-        ),
-      ]);
+      const nextDraft = await api<Draft>(
+        `/admin/api/configuration/routes/${encodeURIComponent(draftId)}`,
+      );
+      const nextEditable = clone(nextDraft.snapshot);
+      nextEditable.router.allowed_models = Object.keys(nextEditable.llms).sort();
       setDraft(nextDraft);
       setDraftName(nextDraft.name || "");
-      setEditable(clone(nextDraft.snapshot));
+      setEditable(nextEditable);
       setReleaseNotes(nextDraft.release_notes);
-      setDiff(nextDiff);
     } catch (reason) {
       handleError(reason);
     } finally {
@@ -378,6 +331,8 @@ export function ConfigurationPage({
 
   async function saveDraft(): Promise<Draft | null> {
     if (!draft || !editable || draft.status === "finalized") return draft;
+    const snapshot = clone(editable);
+    snapshot.router.allowed_models = Object.keys(snapshot.llms).sort();
     const nextDraft = await api<Draft>(
       `/admin/api/configuration/routes/${encodeURIComponent(draft.draft_id)}`,
       {
@@ -385,21 +340,16 @@ export function ConfigurationPage({
         headers: writeHeaders(),
         body: JSON.stringify({
           revision: draft.revision,
-          snapshot: editable,
+          snapshot,
           release_notes: releaseNotes,
           name: draftName,
         }),
       },
     );
-      setDraft(nextDraft);
-      setDraftName(nextDraft.name || "");
+    setDraft(nextDraft);
+    setDraftName(nextDraft.name || "");
     setEditable(clone(nextDraft.snapshot));
     setReleaseNotes(nextDraft.release_notes);
-    setDiff(
-      await api<DraftDiff>(
-        `/admin/api/configuration/routes/${encodeURIComponent(nextDraft.draft_id)}/diff`,
-      ),
-    );
     return nextDraft;
   }
 
@@ -421,7 +371,7 @@ export function ConfigurationPage({
       const created = await api<Draft>("/admin/api/configuration/routes", {
         method: "POST",
         headers: writeHeaders(),
-        body: JSON.stringify({ release_notes: "", name: "未命名草稿" }),
+        body: JSON.stringify({ release_notes: "", name: "未命名智能路由" }),
       });
       setNotice("已从当前配置创建智能路由版本。");
       setEditorOpen(true);
@@ -429,7 +379,8 @@ export function ConfigurationPage({
     });
   }
 
-  async function validateDraft() {
+  async function publishDraft() {
+    if (!draft) return;
     await perform(async () => {
       const current = dirty ? await saveDraft() : draft;
       if (!current) return;
@@ -445,31 +396,24 @@ export function ConfigurationPage({
       setDraftName(validated.name || "");
       setEditable(clone(validated.snapshot));
       setReleaseNotes(validated.release_notes);
-      setNotice(
-        validated.status === "ready"
-          ? "校验通过，智能路由版本可以生成配置版本。"
-          : "校验完成，但仍存在问题。",
-      );
-      await loadPage(validated.draft_id);
-    });
-  }
-
-  async function finalizeDraft() {
-    if (!draft) return;
-    await perform(async () => {
+      if (validated.status !== "ready") {
+        setNotice("校验未通过，请先修正配置问题。");
+        await loadPage(validated.draft_id);
+        return;
+      }
       const version = await api<Version>(
-        `/admin/api/configuration/routes/${encodeURIComponent(draft.draft_id)}/finalize`,
+        `/admin/api/configuration/routes/${encodeURIComponent(validated.draft_id)}/finalize`,
         {
           method: "POST",
           headers: writeHeaders(),
-          body: JSON.stringify({ revision: draft.revision }),
+          body: JSON.stringify({ revision: validated.revision }),
         },
       );
       setNotice(
-        `版本 ${version.version_number} 已进入待发布状态，运行时配置未改变。`,
+        `版本 ${version.version_number} 已生成，可在活动记录中启用。`,
       );
-      await loadPage(draft.draft_id);
-      await loadDraft(draft.draft_id);
+      await loadPage(validated.draft_id);
+      await loadDraft(validated.draft_id);
     });
   }
 
@@ -536,7 +480,6 @@ export function ConfigurationPage({
     while (editable.llms[alias]) alias = `${baseAlias}-${suffix++}`;
     mutate((snapshot) => {
       snapshot.llms[alias] = { model: modelId, description: "", max_tokens: 4096, context_limit: 32768 };
-      snapshot.router.allowed_models = [...new Set([...snapshot.router.allowed_models, alias])].sort();
     });
     setNewModelId("");
   }
@@ -545,7 +488,6 @@ export function ConfigurationPage({
     if (!editable || Object.keys(editable.llms).length <= 1) return;
     mutate((snapshot) => {
       delete snapshot.llms[alias];
-      snapshot.router.allowed_models = snapshot.router.allowed_models.filter((item) => item !== alias);
       if (snapshot.router.default_model === alias) snapshot.router.default_model = null;
     });
   }
@@ -673,8 +615,8 @@ export function ConfigurationPage({
       {view === "configuration" && editorOpen && draft && editable && !draftLoading && (
         <Dialog open={editorOpen} onOpenChange={setEditorOpen}><DialogContent className="route-editor-dialog">
           <section className="panel">
-            <div className="panel-title configuration-title">
-              <div>
+            <div className="route-editor-header">
+              <div className="route-editor-title">
                 <h2>智能路由版本编辑器</h2>
                 <span>
                   {translateStatus(draft.status)} · 修订 {draft.revision}
@@ -682,7 +624,7 @@ export function ConfigurationPage({
                 </span>
               </div>
               <label className="field compact-field"><span>智能路由名称</span><input value={draftName} onChange={(event) => setDraftName(event.target.value)} /></label>
-              <div className="actions">
+              <div className="route-editor-actions">
                 <button className="secondary" disabled={actionBusy} onClick={() => void perform(async () => { const updated = await api<Draft>(`/admin/api/configuration/routes/${encodeURIComponent(draft.draft_id)}/activation`, { method: "POST", headers: writeHeaders(), body: JSON.stringify({ active: !draft.is_active }) }); setDraft(updated); await loadPage(draft.draft_id); })}>{draft.is_active ? "停用" : "启用"}</button>
                 <button
                   className="secondary"
@@ -696,23 +638,14 @@ export function ConfigurationPage({
                   保存版本
                 </button>
                 <button
-                  className="secondary"
-                  onClick={() => void validateDraft()}
-                  disabled={actionBusy || !editableDraft}
-                >
-                  校验版本
-                </button>
-                <button
-                  onClick={() => void finalizeDraft()}
+                  onClick={() => void publishDraft()}
                   disabled={
                     actionBusy ||
                     !editableDraft ||
-                    dirty ||
-                    draft.status !== "ready" ||
                     !releaseNotes.trim()
                   }
                 >
-                  生成配置版本
+                  保存并生成版本
                 </button>
                 <button
                   className="danger"
@@ -723,6 +656,7 @@ export function ConfigurationPage({
                 </button>
               </div>
             </div>
+            <p className="route-editor-note">保存用于继续编辑；保存并生成版本会自动校验，生成后可在活动记录中启用。</p>
 
             {draft.validation_issues.length > 0 && (
               <div className="validation" role="alert">
@@ -756,23 +690,6 @@ export function ConfigurationPage({
                 <NumberField label="判断超时时间（秒）" id="judge-timeout" value={editable.router.judge_timeout_seconds} onChange={(value) => mutate((snapshot) => { snapshot.router.judge_timeout_seconds = value; })} step="0.1" />
                 <NumberField label="判断令牌预算" id="judge-tokens" value={editable.router.judge_max_tokens} onChange={(value) => mutate((snapshot) => { snapshot.router.judge_max_tokens = value; })} />
                 <NumberField label="路由上下文字符数" id="routing-context" value={editable.router.routing_context_chars} onChange={(value) => mutate((snapshot) => { snapshot.router.routing_context_chars = value; })} />
-              </div>
-              <div className="checkbox-group" aria-label="可用模型">
-                <span>可用模型</span>
-                {aliases.map((alias) => (
-                  <label key={alias}>
-                    <input
-                      type="checkbox"
-                      checked={editable.router.allowed_models.includes(alias)}
-                      onChange={(event) => mutate((snapshot) => {
-                        snapshot.router.allowed_models = event.target.checked
-                          ? [...snapshot.router.allowed_models, alias].sort()
-                          : snapshot.router.allowed_models.filter((item) => item !== alias);
-                      })}
-                    />
-                    {alias}
-                  </label>
-                ))}
               </div>
               <Field label="判断系统提示词" htmlFor="judge-prompt">
                 <textarea
@@ -850,39 +767,19 @@ export function ConfigurationPage({
             </Field>
           </section>
 
-          <div className="configuration-columns">
-            <section className="panel">
-              <div className="panel-title"><h2>稳定差异</h2><span>{diff?.changes.length || 0} 项变更</span></div>
-              {!diff?.changes.length ? <div className="state">相对基础版本没有已保存的差异。</div> : (
-                <div className="diff-list">
-                  {diff.changes.map((change) => (
-                    <article key={change.path}>
-                      <code>{change.path}</code>
-                      <div><span>修改前</span><pre>{formatValue(change.before)}</pre></div>
-                      <div><span>修改后</span><pre>{formatValue(change.after)}</pre></div>
-                    </article>
-                  ))}
-                </div>
-              )}
-            </section>
-            <section className="panel">
-              <div className="panel-title"><h2>托管配置 YAML</h2><span>只读</span></div>
-              <pre className="yaml-view" aria-label="托管配置 YAML">{toYaml(editable)}</pre>
-            </section>
-          </div>
         </DialogContent></Dialog>
       )}
 
       {view === "activity" && <div className="configuration-columns">
         <section className="panel">
-          <div className="panel-title"><h2>版本历史</h2><span>不可变快照</span></div>
+          <div className="panel-title"><div><h2>版本历史</h2><span>已生成的配置版本</span></div><button className="secondary" onClick={() => void loadPage()}>刷新记录</button></div>
           {!versions?.items.length ? <div className="state">暂无配置版本。</div> : (
             <div className="table-wrap"><table className="compact-table"><thead><tr><th>版本</th><th>状态</th><th>来源</th><th>创建时间</th><th>发布说明</th><th>操作</th></tr></thead><tbody>
               {versions.items.map((item) => <tr key={item.version_id}>
                 <td>v{item.version_number}</td>
                 <td><span className={`status ${item.publish_state}`}>{translateStatus(item.publish_state)}{item.is_active ? " · 当前" : ""}</span></td>
                 <td>{translateSource(item.source)}</td>
-                <td>{new Date(item.created_at).toLocaleString()}</td>
+                <td>{new Date(item.created_at).toLocaleString("zh-CN")}</td>
                 <td>{item.release_notes || "—"}</td>
                 <td><div className="actions compact-actions">
                   {!item.is_active && <button className="secondary" disabled={actionBusy} onClick={() => void activateVersion(item)}>启用</button>}

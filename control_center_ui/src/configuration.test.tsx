@@ -128,6 +128,16 @@ afterEach(() => {
 });
 
 describe("Configuration page", () => {
+  it("does not open the version editor until a route is selected", async () => {
+    const existing = draft();
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => commonGet(details(input).path, [existing])));
+    render(<ConfigurationPage csrf="csrf-value" onUnauthorized={vi.fn()} />);
+    expect(await screen.findByText("智能路由版本管理")).toBeTruthy();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /测试草稿/ }));
+    expect(await screen.findByRole("dialog")).toBeTruthy();
+  });
+
   it("renders loading and empty states", async () => {
     const pending = vi.fn(() => new Promise<Response>(() => undefined));
     vi.stubGlobal("fetch", pending);
@@ -178,6 +188,11 @@ describe("Configuration page", () => {
         current = { ...current, status: "ready", validation_issues: [] };
         return response(current);
       }
+      if (request.method === "POST" && request.path.endsWith("/finalize")) {
+        writes.push(request);
+        current = { ...current, status: "finalized", finalized_version_id: 2 };
+        return response({ ...active, version_id: 2, version_number: 2, is_active: false, publish_state: "pending", source: "draft" }, 201);
+      }
       return commonGet(request.path, exists ? [current] : []);
     }));
 
@@ -187,18 +202,17 @@ describe("Configuration page", () => {
     fireEvent.click(defaultModel);
     fireEvent.click(await screen.findByRole("option", { name: "qwen" }));
     fireEvent.change(screen.getByLabelText("发布说明"), { target: { value: "Prefer qwen" } });
-    fireEvent.click(screen.getByRole("button", { name: "校验版本" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存并生成版本" }));
 
-    expect(await screen.findByText(/校验通过/)).toBeTruthy();
-    expect(writes.map((item) => item.method)).toEqual(["POST", "PUT", "POST"]);
+    expect(await screen.findByText(/版本 2 已生成/)).toBeTruthy();
+    expect(writes.map((item) => item.method)).toEqual(["POST", "PUT", "POST", "POST"]);
     for (const write of writes) {
       const headers = new Headers(write.init?.headers);
       expect(headers.get("X-CSRF-Token")).toBe("csrf-value");
       expect(headers.get("Origin")).toBe(window.location.origin);
     }
     expect(current.snapshot.router.default_model).toBe("qwen");
-    expect(screen.getByRole("button", { name: "生成配置版本" }).hasAttribute("disabled")).toBe(false);
-    expect(screen.getByLabelText("托管配置 YAML").textContent).toContain("default_model: \"qwen\"");
+    expect(screen.getByRole("button", { name: "保存并生成版本" }).hasAttribute("disabled")).toBe(true);
   });
 
   it("shows validation issues and blocks finalization", async () => {
@@ -209,8 +223,9 @@ describe("Configuration page", () => {
     }]);
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => commonGet(details(input).path, [invalid])));
     render(<ConfigurationPage csrf="csrf-value" onUnauthorized={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /测试草稿/ }));
     expect((await screen.findByRole("alert")).textContent).toContain("不能将路由器内部模型 ID 用作上游候选模型");
-    expect(screen.getByRole("button", { name: "生成配置版本" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "保存并生成版本" }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByLabelText("判断模型")).toBeTruthy();
     expect(screen.getByLabelText("缓存有效期（秒）")).toBeTruthy();
   });
@@ -224,14 +239,19 @@ describe("Configuration page", () => {
         current = { ...current, status: "finalized", finalized_version_id: 2 };
         return response(pending, 201);
       }
+      if (request.method === "POST" && request.path.endsWith("/validate")) {
+        current = { ...current, status: "ready", validation_issues: [] };
+        return response(current);
+      }
       if (request.path === "/admin/api/configuration/versions") {
         return response({ items: [pending, active], page: 1, page_size: 25, total: 2 });
       }
       return commonGet(request.path, [current]);
     }));
     render(<ConfigurationPage csrf="csrf-value" onUnauthorized={vi.fn()} />);
-    fireEvent.click(await screen.findByRole("button", { name: "生成配置版本" }));
-    expect(await screen.findByText(/版本 2 已进入待发布状态/)).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: /测试草稿/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "保存并生成版本" }));
+    expect(await screen.findByText(/版本 2 已生成/)).toBeTruthy();
     const activityView = render(<ConfigurationPage csrf="csrf-value" onUnauthorized={vi.fn()} view="activity" />);
     expect(await screen.findByText("待发布")).toBeTruthy();
     expect(screen.getAllByRole("button", { name: "启用" }).length).toBeGreaterThan(0);
