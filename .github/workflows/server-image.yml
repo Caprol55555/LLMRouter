@@ -1,5 +1,9 @@
 name: Test and publish router server
 
+concurrency:
+  group: server-image-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     branches:
@@ -16,6 +20,7 @@ on:
       - 'Dockerfile.server'
       - '.dockerignore'
       - 'pyproject.toml'
+      - 'deploy/server/**'
       - '.github/workflows/server-image.yml'
   pull_request:
     paths:
@@ -29,6 +34,7 @@ on:
       - 'Dockerfile.server'
       - '.dockerignore'
       - 'pyproject.toml'
+      - 'deploy/server/**'
       - '.github/workflows/server-image.yml'
   workflow_dispatch:
 
@@ -39,6 +45,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -68,10 +75,26 @@ jobs:
           tests/test_openclaw_websocket_smoke.py
           tests/control_center
 
+      - name: Validate production deployment assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n deploy/server/update-llmrouter
+          bash -n deploy/server/auto-update-llmrouter
+          printf '%s\n' 'LLMROUTER_IMAGE=ghcr.io/caprol55555/llmrouter:main' > /tmp/llmrouter-ci.env
+          printf '%s\n' 'LLMROUTER_INBOUND_API_KEY=ci-inbound-key' >> /tmp/llmrouter-ci.env
+          printf '%s\n' 'NINE_ROUTER_INTERNAL_API_KEY=ci-upstream-key' >> /tmp/llmrouter-ci.env
+          printf '%s\n' 'LLMROUTER_ADMIN_TOKEN=ci-admin-token' >> /tmp/llmrouter-ci.env
+          docker compose --env-file /tmp/llmrouter-ci.env \
+            -f deploy/server/docker-compose.yml config --quiet
+
   image:
-    if: github.event_name != 'pull_request'
-    needs: test
+    if: github.event_name == 'push'
+    needs:
+      - test
+      - container-smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -80,6 +103,14 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate image metadata
+        id: metadata
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/caprol55555/llmrouter
+          tags: |
+            type=sha,prefix=sha-,format=long
+            type=raw,value=main,enable={{is_default_branch}}
       - name: Build and publish linux/amd64 image
         uses: docker/build-push-action@v6
         with:
@@ -89,15 +120,14 @@ jobs:
           push: true
           build-args: |
             LLMROUTER_COMMIT_SHA=${{ github.sha }}
-          tags: |
-            ghcr.io/caprol55555/llmrouter:sha-${{ github.sha }}
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   container-smoke:
-    needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Build local runtime image

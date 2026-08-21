@@ -24,6 +24,27 @@ CI also builds the server image and runs a read-only-root smoke with `/data`
 mounted writable. That smoke checks `/health`, database creation, and that the
 runtime image cannot import `torch`, `transformers`, or `gradio`.
 
+## Tested-main deployment
+
+The production workflow publishes an immutable `sha-<commit>` tag on branch
+pushes. It additionally moves the `main` tag only for the default branch and
+only after backend/frontend tests and the container smoke pass. Production
+hosts poll `main`, read the image's `org.opencontainers.image.revision` label,
+then deploy the matching immutable SHA tag and digest.
+
+The reference server assets live under `deploy/server/`. They keep the runtime
+bound to `127.0.0.1:8000`, mount `/data` from the host, and run with a read-only
+root filesystem, dropped capabilities, bounded PIDs, CPU, and memory. The
+automatic updater performs an online SQLite backup and verifies health,
+inference authentication, Dashboard availability, unauthenticated admin
+rejection, and database integrity. A failed image is rolled back and
+quarantined until `main` points to a different image.
+
+The Control Center has no public ingress. Operators should use an SSH tunnel to
+the loopback listener and open `/dashboard`. The dedicated
+`LLMROUTER_ADMIN_TOKEN` must remain in the root-owned production environment
+file and must not be reused as the inference or upstream API key.
+
 ## Failure recovery
 
 - If Control Center initialization fails, inference endpoints remain available

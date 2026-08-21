@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly APP_DIR=/opt/llmrouter
+readonly COMPOSE_FILE="$APP_DIR/docker-compose.yml"
+readonly ENV_FILE="$APP_DIR/.env"
+readonly CONFIG_FILE="$APP_DIR/config.yaml"
+readonly DATA_DIR="$APP_DIR/data"
+readonly DATABASE_FILE="$DATA_DIR/control-center.db"
+readonly SERVICE=llmrouter
+readonly IMAGE_REPOSITORY=ghcr.io/caprol55555/llmrouter
+readonly ROLLBACK_IMAGE=llmrouter:rollback
+readonly BACKUP_ROOT=/opt/backups/llmrouter-update
+readonly LOCK_FILE=/run/lock/llmrouter-update.lock
+
+log() {
+  printf '[%s] %s\n' "$(date --iso-8601=seconds)" "$*"
+}
+
+usage() {
+  echo "Usage: sudo update-llmrouter <40-character-commit-sha> [--yes]"
+}
+
+write_image_reference() {
+  local image_reference="$1"
+  local temporary_file
+  temporary_file="$(mktemp "$APP_DIR/.env.update.XXXXXX")"
+  awk -v image="$image_reference" '
+    BEGIN { replaced = 0 }
+    /^LLMROUTER_IMAGE=/ {
+      print "LLMROUTER_IMAGE=" image
+      replaced = 1
+      next
+    }
+    { print }
+    END { if (!replaced) print "LLMROUTER_IMAGE=" image }
+  ' "$ENV_FILE" > "$temporary_file"
+  chown --reference="$ENV_FILE" "$temporary_file"
+  chmod --reference="$ENV_FILE" "$temporary_file"
+  mv "$temporary_file" "$ENV_FILE"
+}
+
+wait_for_health() {
+  local healthy=0
+  for _ in $(seq 1 60); do
+    if [[ "$(docker inspect "$SERVICE" --format '{{.State.Status}}' 2>/dev/null || true)" == "running" ]] \
+      && curl -fsS -o /dev/null --max-time 3 http://127.0.0.1:8000/health; then
+      healthy=1
+      break
+    fi
+    sleep 1
+  done
+  [[ "$healthy" == "1" ]]
+}
+
+backup_database() {
+  local backup_dir="$1"
+  if [[ ! -f "$DATABASE_FILE" ]]; then
+    touch "$backup_dir/NO_DATABASE"
+    return
+  fi
+
+  python3 - "$DATABASE_FILE" "$backup_dir/control-center.db" <<'PY'
+import sqlite3
+import sys
+
+source_path, destination_path = sys.argv[1:]
+source = sqlite3.connect(f"file:{source_path}?mode=ro", uri=True)
+destination = sqlite3.connect(destination_path)
+try:
+    source.backup(destination)
+finally:
+    destination.close()
+    source.close()
+PY
+}
+
+restore_database() {
+  local backup_dir="$1"
+  rm -f "$DATABASE_FILE-wal" "$DATABASE_FILE-shm"
+  if [[ -f "$backup_dir/control-center.db" ]]; then
+    install -o 10001 -g 10001 -m 600 "$backup_dir/control-center.db" "$DATABASE_FILE"
+  elif [[ -f "$backup_dir/NO_DATABASE" ]]; then
+    rm -f "$DATABASE_FILE"
+  fi
+}
+
+restore_previous_release() {
+  local backup_dir="$1"
+  local failed_image="$2"
+  trap - ERR
+  set +e
+  log "Update failed; restoring previous LLMRouter release"
+  docker rm -f "$SERVICE" >/dev/null 2>&1 || true
+  cp -a "$backup_dir/.env" "$ENV_FILE"
+  cp -a "$backup_dir/config.yaml" "$CONFIG_FILE"
+  cp -a "$backup_dir/docker-compose.yml" "$COMPOSE_FILE"
+  restore_database "$backup_dir"
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --force-recreate "$SERVICE"
+  wait_for_health || true
+  printf '%s\n' "$failed_image" > "$backup_dir/FAILED_IMAGE"
+  log "Rollback completed; inspect $backup_dir"
+  exit 1
+}
+
+if [[ "$EUID" -ne 0 ]]; then
+  echo "Run this command with sudo."
+  exit 1
+fi
+if [[ $# -lt 1 || $# -gt 2 ]]; then
+  usage
+  exit 2
+fi
+
+commit_sha="${1,,}"
+assume_yes=0
+if [[ $# -eq 2 ]]; then
+  [[ "$2" == "--yes" ]] || { usage; exit 2; }
+  assume_yes=1
+fi
+if [[ ! "$commit_sha" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "Commit SHA must contain exactly 40 lowercase hexadecimal characters."
+  exit 2
+fi
+
+for required in "$COMPOSE_FILE" "$ENV_FILE" "$CONFIG_FILE"; do
+  [[ -f "$required" ]] || { echo "Required file not found: $required"; exit 1; }
+done
+
+mkdir -p /run/lock "$BACKUP_ROOT" "$DATA_DIR"
+chmod 700 "$BACKUP_ROOT"
+chown 10001:10001 "$DATA_DIR"
+chmod 700 "$DATA_DIR"
+exec 9>"$LOCK_FILE"
+flock -n 9 || { log "Another LLMRouter update is running"; exit 1; }
+
+current_image_id="$(docker inspect "$SERVICE" --format '{{.Image}}' 2>/dev/null || true)"
+current_image_reference="$(docker inspect "$SERVICE" --format '{{.Config.Image}}' 2>/dev/null || true)"
+[[ -n "$current_image_id" ]] || { log "Container $SERVICE does not exist"; exit 1; }
+
+candidate_tag="$IMAGE_REPOSITORY:sha-$commit_sha"
+echo "Current image:   $current_image_reference"
+echo "Candidate image: $candidate_tag"
+if [[ "$assume_yes" != "1" ]]; then
+  [[ -t 0 ]] || { echo "Interactive confirmation required unless --yes is supplied."; exit 1; }
+  read -r -p "Continue with a backed-up update? [y/N] " answer
+  [[ "$answer" =~ ^[Yy]$ ]] || { echo "Update cancelled."; exit 0; }
+fi
+
+docker pull "$candidate_tag"
+candidate_image_id="$(docker image inspect "$candidate_tag" --format '{{.Id}}')"
+repo_digest="$(docker image inspect "$candidate_tag" --format '{{range .RepoDigests}}{{println .}}{{end}}' | grep -Fm1 "$IMAGE_REPOSITORY@sha256:")"
+candidate_reference="$candidate_tag@${repo_digest#*@}"
+[[ "$(docker image inspect "$candidate_tag" --format '{{.Architecture}}')" == "amd64" ]]
+[[ "$(docker image inspect "$candidate_tag" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" == "$commit_sha" ]]
+
+if [[ "$candidate_image_id" == "$current_image_id" ]]; then
+  log "Commit $commit_sha is already running; no update needed"
+  exit 0
+fi
+
+docker image tag "$current_image_id" "$ROLLBACK_IMAGE"
+backup_dir="$BACKUP_ROOT/$(date +%Y%m%d-%H%M%S)"
+mkdir -m 700 "$backup_dir"
+cp -a "$COMPOSE_FILE" "$backup_dir/docker-compose.yml"
+cp -a "$ENV_FILE" "$backup_dir/.env"
+cp -a "$CONFIG_FILE" "$backup_dir/config.yaml"
+backup_database "$backup_dir"
+
+trap 'restore_previous_release "$backup_dir" "$candidate_reference"' ERR
+write_image_reference "$candidate_reference"
+docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" config --quiet
+docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --force-recreate "$SERVICE"
+wait_for_health
+
+inbound_key="$(sed -n 's/^LLMROUTER_INBOUND_API_KEY=//p' "$ENV_FILE" | tail -n 1)"
+admin_token="$(sed -n 's/^LLMROUTER_ADMIN_TOKEN=//p' "$ENV_FILE" | tail -n 1)"
+[[ -n "$inbound_key" ]]
+[[ -n "$admin_token" ]]
+unauthorized_status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:8000/v1/models)"
+authorized_status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 -H "Authorization: Bearer $inbound_key" http://127.0.0.1:8000/v1/models)"
+dashboard_status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:8000/dashboard)"
+admin_status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:8000/admin/api/status)"
+[[ "$unauthorized_status" == "401" ]]
+[[ "$authorized_status" == "200" ]]
+[[ "$dashboard_status" == "200" ]]
+[[ "$admin_status" == "401" ]]
+[[ -s "$DATABASE_FILE" ]]
+[[ "$(python3 - "$DATABASE_FILE" <<'PY'
+import sqlite3
+import sys
+
+with sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True) as connection:
+    print(connection.execute("PRAGMA quick_check").fetchone()[0])
+PY
+)" == "ok" ]]
+
+trap - ERR
+log "Update completed successfully; image=$candidate_reference backup=$backup_dir"

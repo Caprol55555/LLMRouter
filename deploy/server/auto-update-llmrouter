@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly SERVICE=llmrouter
+readonly MAIN_IMAGE=ghcr.io/caprol55555/llmrouter:main
+readonly FAILED_IMAGE_FILE=/opt/llmrouter/.failed-image-id
+readonly LOCK_FILE=/run/lock/llmrouter-auto-update.lock
+readonly UPDATE_COMMAND=/usr/local/sbin/update-llmrouter
+
+log() {
+  printf '[%s] %s\n' "$(date --iso-8601=seconds)" "$*"
+}
+
+if [[ "$EUID" -ne 0 ]]; then
+  echo "Run this command with sudo."
+  exit 1
+fi
+
+mkdir -p /run/lock
+exec 8>"$LOCK_FILE"
+flock -n 8 || { log "Another automatic update check is running"; exit 0; }
+
+[[ -x "$UPDATE_COMMAND" ]] || { log "Missing update command: $UPDATE_COMMAND"; exit 1; }
+current_image_id="$(docker inspect "$SERVICE" --format '{{.Image}}' 2>/dev/null || true)"
+[[ -n "$current_image_id" ]] || { log "Container $SERVICE does not exist"; exit 1; }
+
+docker pull "$MAIN_IMAGE" >/dev/null
+candidate_image_id="$(docker image inspect "$MAIN_IMAGE" --format '{{.Id}}')"
+candidate_revision="$(docker image inspect "$MAIN_IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+[[ "$candidate_revision" =~ ^[0-9a-f]{40}$ ]] || {
+  log "Candidate image is missing a valid source revision label"
+  exit 1
+}
+
+if [[ "$candidate_image_id" == "$current_image_id" ]]; then
+  rm -f "$FAILED_IMAGE_FILE"
+  log "Already running main revision $candidate_revision"
+  exit 0
+fi
+
+if [[ -f "$FAILED_IMAGE_FILE" ]] && [[ "$(<"$FAILED_IMAGE_FILE")" == "$candidate_image_id" ]]; then
+  log "Skipping previously failed image $candidate_revision"
+  exit 0
+fi
+
+log "Deploying main revision $candidate_revision"
+if "$UPDATE_COMMAND" "$candidate_revision" --yes; then
+  rm -f "$FAILED_IMAGE_FILE"
+  log "Automatic update completed for $candidate_revision"
+else
+  printf '%s\n' "$candidate_image_id" > "$FAILED_IMAGE_FILE"
+  chmod 600 "$FAILED_IMAGE_FILE"
+  log "Automatic update failed for $candidate_revision; it will not be retried until main changes"
+  exit 1
+fi
