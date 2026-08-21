@@ -413,3 +413,16 @@ MIGRATIONS.append(
         ),
     )
 )
+
+MIGRATIONS.append(
+    Migration(
+        version=3,
+        name="add_named_active_drafts_and_model_catalog",
+        statements=(
+            "ALTER TABLE configuration_drafts ADD COLUMN name TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE configuration_drafts ADD COLUMN is_active INTEGER NOT NULL DEFAULT 0 CHECK (is_active IN (0, 1))",
+            "CREATE INDEX idx_configuration_drafts_active ON configuration_drafts(is_active, updated_at DESC)",
+            "CREATE TABLE configuration_model_catalog (model_id TEXT PRIMARY KEY, created_at TEXT NOT NULL)",
+        ),
+    )
+)

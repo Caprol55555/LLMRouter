@@ -1230,6 +1230,30 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
         response.delete_cookie(auth.COOKIE_NAME, path="/admin", samesite="strict")
         return response
 
+    @protected_admin_write.post("/password", include_in_schema=False)
+    async def admin_change_password(request: Request):
+        auth = control_center.admin_auth
+        if auth is None:
+            return admin_error(503, "admin_auth_unavailable", "Administrator authentication is unavailable")
+        body = strict_object(
+            await read_admin_json(request),
+            allowed={"current_password", "new_password"},
+            required={"current_password", "new_password"},
+        )
+        current_password = body["current_password"]
+        new_password = body["new_password"]
+        if not isinstance(current_password, str) or not isinstance(new_password, str):
+            raise SnapshotStructureError("Password fields must be strings")
+        if len(new_password) < 8:
+            raise SnapshotStructureError("New password must be at least 8 characters")
+        if not auth.change_token(current_password, new_password):
+            record_admin_audit("password_change", "denied", summary={"reason": "invalid_current_password"})
+            return admin_error(403, "password_change_denied", "Current password is incorrect")
+        record_admin_audit("password_change", "success")
+        response = JSONResponse({"status": "ok"}, headers={"Cache-Control": "no-store"})
+        response.delete_cookie(auth.COOKIE_NAME, path="/admin", samesite="strict")
+        return response
+
     @protected_admin.get("/status", include_in_schema=False)
     async def protected_admin_status(request: Request):
         return await admin_api_status(request)
@@ -1318,6 +1342,8 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                 "active": service.active_configuration(),
                 "read_only": service.read_only_metadata(),
                 "drafts": service.list_drafts(),
+                "active_drafts": service.list_active_drafts(),
+                "model_catalog": service.model_catalog(),
             },
             headers={"Cache-Control": "no-store"},
         )
@@ -1384,7 +1410,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
     async def create_configuration_draft(request: Request):
         body = strict_object(
             await read_admin_json(request),
-            allowed={"base_version_id", "release_notes"},
+            allowed={"base_version_id", "release_notes", "name"},
             required=set(),
         )
         base_version_id = body.get("base_version_id")
@@ -1396,6 +1422,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
             configuration_service().create_draft(
                 base_version_id=base_version_id,
                 release_notes=body.get("release_notes", ""),
+                name=body.get("name", ""),
             ),
             status_code=201,
             headers={"Cache-Control": "no-store"},
@@ -1407,7 +1434,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
     async def update_configuration_draft(draft_id: str, request: Request):
         body = strict_object(
             await read_admin_json(request),
-            allowed={"revision", "snapshot", "release_notes"},
+            allowed={"revision", "snapshot", "release_notes", "name"},
             required={"revision", "snapshot", "release_notes"},
         )
         revision = body["revision"]
@@ -1419,6 +1446,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                 expected_revision=revision,
                 snapshot=body["snapshot"],
                 release_notes=body["release_notes"],
+                name=body.get("name"),
             ),
             headers={"Cache-Control": "no-store"},
         )
@@ -1441,6 +1469,30 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
             ),
             headers={"Cache-Control": "no-store"},
         )
+
+    @protected_admin_write.post(
+        "/configuration/drafts/{draft_id}/activation", include_in_schema=False
+    )
+    async def set_configuration_draft_activation(draft_id: str, request: Request):
+        body = strict_object(await read_admin_json(request), allowed={"active"}, required={"active"})
+        if not isinstance(body["active"], bool):
+            raise SnapshotStructureError("active must be a boolean")
+        return JSONResponse(
+            configuration_service().set_draft_active(draft_id, active=body["active"]),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @protected_admin.get("/configuration/model-catalog", include_in_schema=False)
+    async def configuration_model_catalog():
+        return JSONResponse({"models": configuration_service().model_catalog()}, headers={"Cache-Control": "no-store"})
+
+    @protected_admin_write.put("/configuration/model-catalog", include_in_schema=False)
+    async def update_configuration_model_catalog(request: Request):
+        body = strict_object(await read_admin_json(request), allowed={"models"}, required={"models"})
+        models = body["models"]
+        if not isinstance(models, list) or any(not isinstance(model, str) for model in models):
+            raise SnapshotStructureError("models must be an array of strings")
+        return JSONResponse({"models": configuration_service().replace_model_catalog(models)}, headers={"Cache-Control": "no-store"})
 
     @protected_admin_write.post(
         "/configuration/drafts/{draft_id}/finalize", include_in_schema=False

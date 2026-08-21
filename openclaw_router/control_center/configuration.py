@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-from ..config import OpenClawConfig
+from ..config import LLMConfig, OpenClawConfig
 
 
 SNAPSHOT_KEYS = {"router", "session_routing", "llms"}
@@ -261,8 +261,31 @@ def apply_managed_snapshot(config: OpenClawConfig, snapshot: Any) -> OpenClawCon
     for key, value in session.items():
         setattr(config.session_routing, key, value)
 
+    existing = next(iter(config.llms.values()), None)
+    for alias in list(config.llms):
+        if alias not in normalized["llms"]:
+            del config.llms[alias]
     for alias, values in normalized["llms"].items():
-        llm = config.llms[alias]
+        llm = config.llms.get(alias)
+        if llm is None:
+            if existing is None:
+                raise SnapshotStructureError("At least one configured backend is required")
+            llm = LLMConfig(
+                name=alias,
+                provider=existing.provider,
+                model_id=values["model"],
+                base_url=existing.base_url,
+                provider_type=existing.provider_type,
+                auth_mode=existing.auth_mode,
+                chat_path=existing.chat_path,
+                local=existing.local,
+                api_key=existing.api_key,
+                api_key_env=existing.api_key_env,
+                description=values["description"],
+                max_tokens=values["max_tokens"],
+                context_limit=values["context_limit"],
+            )
+            config.llms[alias] = llm
         llm.model_id = values["model"]
         llm.description = values["description"]
         llm.max_tokens = values["max_tokens"]
@@ -281,18 +304,11 @@ def normalize_snapshot(snapshot: Any, configured_aliases: Iterable[str]) -> Dict
     session = _expect_dict(root["session_routing"], "snapshot.session_routing")
     _expect_exact_keys(session, SESSION_KEYS, "snapshot.session_routing")
     llms = _expect_dict(root["llms"], "snapshot.llms")
-    if sorted(llms) != aliases:
-        unknown = sorted(set(llms) - set(aliases))
-        missing = sorted(set(aliases) - set(llms))
-        details = []
-        if unknown:
-            details.append(f"unknown aliases: {', '.join(unknown)}")
-        if missing:
-            details.append(f"missing aliases: {', '.join(missing)}")
-        raise SnapshotStructureError("snapshot.llms must match configured backends (" + "; ".join(details) + ")")
+    if not llms and aliases:
+        raise SnapshotStructureError("snapshot.llms must contain at least one model")
 
     normalized_llms: Dict[str, Dict[str, Any]] = {}
-    for alias in aliases:
+    for alias in sorted(llms):
         item = _expect_dict(llms[alias], f"snapshot.llms.{alias}")
         _expect_exact_keys(item, LLM_KEYS, f"snapshot.llms.{alias}")
         normalized_llms[alias] = {
@@ -330,7 +346,7 @@ def normalize_snapshot(snapshot: Any, configured_aliases: Iterable[str]) -> Dict
             "allowed_models": _expect_unique_strings(
                 router["allowed_models"],
                 "snapshot.router.allowed_models",
-                maximum_items=max(1, len(aliases)),
+                maximum_items=max(1, len(llms), len(aliases)),
             ),
             "judge_timeout_seconds": _expect_number(
                 router["judge_timeout_seconds"],
@@ -410,7 +426,7 @@ def validate_snapshot(
     forbidden_models: Iterable[str],
     forbidden_prefixes: Iterable[str],
 ) -> List[ValidationIssue]:
-    aliases = set(configured_aliases)
+    aliases = set(snapshot.get("llms", {}))
     issues: List[ValidationIssue] = []
     router = snapshot["router"]
     allowed = set(router["allowed_models"])
@@ -797,6 +813,13 @@ class ConfigurationService:
             ).fetchall()
         return [self._draft_row(row, include_snapshot=False) for row in rows]
 
+    def list_active_drafts(self) -> List[Dict[str, Any]]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT * FROM configuration_drafts WHERE is_active = 1 ORDER BY updated_at DESC, draft_id ASC"
+            ).fetchall()
+        return [self._draft_row(row, include_snapshot=False) for row in rows]
+
     def get_draft(self, draft_id: str) -> Dict[str, Any]:
         with closing(self._connect()) as connection:
             row = self._draft(connection, draft_id)
@@ -807,8 +830,10 @@ class ConfigurationService:
         *,
         base_version_id: Optional[int] = None,
         release_notes: str = "",
+        name: str = "",
     ) -> Dict[str, Any]:
         notes = self._normalize_release_notes(release_notes)
+        name = self._normalize_draft_name(name)
         now = _utc_now()
         draft_id = secrets.token_urlsafe(18)
         with closing(self._connect()) as connection:
@@ -824,9 +849,9 @@ class ConfigurationService:
                 connection.execute(
                     "INSERT INTO configuration_drafts "
                     "(draft_id, base_version_id, finalized_version_id, status, revision, snapshot_json, checksum, "
-                    "validation_json, release_notes, created_at, updated_at) "
-                    "VALUES (?, ?, NULL, 'editing', 1, ?, ?, '[]', ?, ?, ?)",
-                    (draft_id, base_id, base["snapshot_json"], base["checksum"], notes, now, now),
+                    "validation_json, release_notes, created_at, updated_at, name, is_active) "
+                    "VALUES (?, ?, NULL, 'editing', 1, ?, ?, '[]', ?, ?, ?, ?, 0)",
+                    (draft_id, base_id, base["snapshot_json"], base["checksum"], notes, now, now, name),
                 )
                 self._insert_audit(
                     connection,
@@ -850,6 +875,7 @@ class ConfigurationService:
         expected_revision: int,
         snapshot: Any,
         release_notes: str,
+        name: Optional[str] = None,
     ) -> Dict[str, Any]:
         normalized = normalize_snapshot(snapshot, self._aliases)
         notes = self._normalize_release_notes(release_notes)
@@ -862,15 +888,17 @@ class ConfigurationService:
                 row = self._draft(connection, draft_id)
                 self._require_editable_revision(row, expected_revision)
                 next_revision = int(row["revision"]) + 1
+                next_name = row["name"] if name is None else self._normalize_draft_name(name)
                 connection.execute(
                     "UPDATE configuration_drafts SET status = 'editing', revision = ?, snapshot_json = ?, "
-                    "checksum = ?, validation_json = ?, release_notes = ?, updated_at = ? WHERE draft_id = ?",
+                    "checksum = ?, validation_json = ?, release_notes = ?, name = ?, updated_at = ? WHERE draft_id = ?",
                     (
                         next_revision,
                         snapshot_json,
                         _checksum(snapshot_json),
                         _canonical_json([issue.as_dict() for issue in issues]),
                         notes,
+                        next_name,
                         now,
                         draft_id,
                     ),
@@ -889,6 +917,48 @@ class ConfigurationService:
                 self._rollback(connection)
                 raise
         return self.get_draft(draft_id)
+
+    def set_draft_active(self, draft_id: str, *, active: bool) -> Dict[str, Any]:
+        now = _utc_now()
+        with closing(self._connect()) as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                row = self._draft(connection, draft_id)
+                connection.execute(
+                    "UPDATE configuration_drafts SET is_active = ?, updated_at = ? WHERE draft_id = ?",
+                    (1 if active else 0, now, draft_id),
+                )
+                self._insert_audit(
+                    connection,
+                    action="draft_activation_changed",
+                    outcome="success",
+                    subject_type="configuration_draft",
+                    subject_id=draft_id,
+                    summary={"active": bool(active)},
+                    occurred_at=now,
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                self._rollback(connection)
+                raise
+        return self.get_draft(draft_id)
+
+    def replace_model_catalog(self, models: Sequence[str]) -> List[str]:
+        normalized = sorted({str(model).strip() for model in models if str(model).strip()})
+        now = _utc_now()
+        with closing(self._connect()) as connection:
+            connection.execute("DELETE FROM configuration_model_catalog")
+            connection.executemany(
+                "INSERT OR IGNORE INTO configuration_model_catalog (model_id, created_at) VALUES (?, ?)",
+                [(model, now) for model in normalized],
+            )
+            rows = connection.execute("SELECT model_id FROM configuration_model_catalog ORDER BY model_id").fetchall()
+        return [str(row["model_id"]) for row in rows]
+
+    def model_catalog(self) -> List[str]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute("SELECT model_id FROM configuration_model_catalog ORDER BY model_id").fetchall()
+        return [str(row["model_id"]) for row in rows]
 
     def validate_draft(self, draft_id: str, *, expected_revision: int) -> Dict[str, Any]:
         now = _utc_now()
@@ -1134,6 +1204,15 @@ class ConfigurationService:
         return normalized
 
     @staticmethod
+    def _normalize_draft_name(value: Any) -> str:
+        if not isinstance(value, str):
+            raise SnapshotStructureError("name must be a string")
+        normalized = value.strip()
+        if len(normalized) > 120:
+            raise SnapshotStructureError("name must not exceed 120 characters")
+        return normalized
+
+    @staticmethod
     def _version_row(
         row: sqlite3.Row, include_snapshot: bool, active_version_id: int
     ) -> Dict[str, Any]:
@@ -1173,6 +1252,8 @@ class ConfigurationService:
             "release_notes": row["release_notes"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
+            "name": row["name"] if "name" in row.keys() else "",
+            "is_active": bool(row["is_active"]) if "is_active" in row.keys() else False,
         }
         if include_snapshot:
             item["snapshot"] = json.loads(row["snapshot_json"])

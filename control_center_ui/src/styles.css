@@ -71,6 +71,14 @@ button.danger { color: #fecdd3; background: #3b1620; border: 1px solid #7f1d33; 
 .login-shell { min-height: 100vh; display: grid; place-items: center; padding: 1rem; }
 .login-card { width: min(460px, 100%); padding: 2rem; border-radius: 16px; display: grid; gap: 1rem; }
 .login-card p { color: #91a0b1; line-height: 1.55; } .login-card label { font-size: .8rem; color: #aab5c2; }
+.modal-backdrop { position: fixed; inset: 0; display: grid; place-items: center; padding: 1rem; background: rgba(0,0,0,.65); z-index: 20; }
+.modal { width: min(460px, 100%); display: grid; gap: 1rem; padding: 1.2rem; background: #111720; border: 1px solid #2a3543; border-radius: 12px; box-shadow: 0 24px 80px rgba(0,0,0,.45); }
+.model-menu { display: grid; gap: .6rem; margin-top: .8rem; padding: .9rem; border: 1px solid #2a3543; border-radius: 8px; background: #0b1017; max-height: 360px; overflow: auto; }
+.model-menu label { display: flex; align-items: center; gap: .5rem; color: #dbe5ef; }
+.model-menu input[type="checkbox"] { width: auto; }
+.model-add-row { margin-top: .8rem; }
+.model-add-row input { flex: 1; }
+.compact-remove { padding: .25rem .45rem; font-size: .7rem; }
 @media (max-width: 1100px) { .cards { grid-template-columns: repeat(3, 1fr); } .configuration-columns { grid-template-columns: 1fr; } .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 720px) { .shell { padding: 1rem; } header { align-items: flex-start; flex-direction: column; } .actions { flex-wrap: wrap; } .cards, .configuration-summary { grid-template-columns: repeat(2, 1fr); } .bar-row { grid-template-columns: 90px 1fr 40px; } .backend-grid, .form-grid { grid-template-columns: 1fr; } .configuration-title { flex-direction: column; } }
 @media (max-width: 430px) { .cards { grid-template-columns: 1fr; } }

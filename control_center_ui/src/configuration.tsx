@@ -48,12 +48,16 @@ type Draft = {
   release_notes: string;
   created_at: string;
   updated_at: string;
+  name: string;
+  is_active: boolean;
   snapshot: ManagedSnapshot;
 };
 type DraftSummary = Omit<Draft, "snapshot">;
 type ConfigurationSummary = {
   active: Version & { snapshot: ManagedSnapshot };
   drafts: DraftSummary[];
+  active_drafts?: DraftSummary[];
+  model_catalog?: string[];
   read_only: {
     serve: { host: string; port: number };
     router: Record<string, unknown>;
@@ -159,15 +163,18 @@ function formatValue(value: unknown): string {
 export function ConfigurationPage({
   csrf,
   onUnauthorized,
+  view = "configuration",
 }: {
   csrf: string;
   onUnauthorized: () => void;
+  view?: "configuration" | "activity" | "route-lab";
 }) {
   const [summary, setSummary] = useState<ConfigurationSummary | null>(null);
   const [versions, setVersions] = useState<VersionPage | null>(null);
   const [audit, setAudit] = useState<AuditPage | null>(null);
   const [selectedId, setSelectedId] = useState("");
   const [draft, setDraft] = useState<Draft | null>(null);
+  const [draftName, setDraftName] = useState("");
   const [editable, setEditable] = useState<ManagedSnapshot | null>(null);
   const [releaseNotes, setReleaseNotes] = useState("");
   const [diff, setDiff] = useState<DraftDiff | null>(null);
@@ -180,11 +187,15 @@ export function ConfigurationPage({
   const [labResult, setLabResult] = useState<LabResult | null>(null);
   const [labVersionId, setLabVersionId] = useState("");
   const [discovery, setDiscovery] = useState<DiscoveryResult | null>(null);
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [modelSearch, setModelSearch] = useState("");
+  const [selectedDiscoveredModels, setSelectedDiscoveredModels] = useState<string[]>([]);
+  const [newAlias, setNewAlias] = useState("");
 
   function handleError(reason: unknown) {
     const apiError = reason as ApiError;
     if (apiError.status === 401) onUnauthorized();
-    else setError(apiError.message || "Configuration request failed");
+    else setError(apiError.message || "配置请求失败");
   }
 
   async function loadPage(preferredDraftId?: string) {
@@ -199,6 +210,7 @@ export function ConfigurationPage({
       setSummary(nextSummary);
       setVersions(nextVersions);
       setAudit(nextAudit);
+      setSelectedDiscoveredModels(nextSummary.model_catalog || []);
       const candidate = preferredDraftId || selectedId;
       const nextSelected = nextSummary.drafts.some((item) => item.draft_id === candidate)
         ? candidate
@@ -228,6 +240,7 @@ export function ConfigurationPage({
         ),
       ]);
       setDraft(nextDraft);
+      setDraftName(nextDraft.name || "");
       setEditable(clone(nextDraft.snapshot));
       setReleaseNotes(nextDraft.release_notes);
       setDiff(nextDiff);
@@ -247,14 +260,14 @@ export function ConfigurationPage({
   }, [selectedId]);
 
   const dirty = useMemo(
-    () =>
-      Boolean(
-        draft &&
-          editable &&
-          (JSON.stringify(draft.snapshot) !== JSON.stringify(editable) ||
-            draft.release_notes !== releaseNotes),
+    () => Boolean(
+      draft && editable && (
+        JSON.stringify(draft.snapshot) !== JSON.stringify(editable) ||
+        draft.release_notes !== releaseNotes ||
+        (draft.name || "") !== draftName
       ),
-    [draft, editable, releaseNotes],
+    ),
+    [draft, editable, releaseNotes, draftName],
   );
 
   function mutate(update: (snapshot: ManagedSnapshot) => void) {
@@ -286,10 +299,12 @@ export function ConfigurationPage({
           revision: draft.revision,
           snapshot: editable,
           release_notes: releaseNotes,
+          name: draftName,
         }),
       },
     );
-    setDraft(nextDraft);
+      setDraft(nextDraft);
+      setDraftName(nextDraft.name || "");
     setEditable(clone(nextDraft.snapshot));
     setReleaseNotes(nextDraft.release_notes);
     setDiff(
@@ -318,7 +333,7 @@ export function ConfigurationPage({
       const created = await api<Draft>("/admin/api/configuration/drafts", {
         method: "POST",
         headers: writeHeaders(),
-        body: JSON.stringify({ release_notes: "" }),
+        body: JSON.stringify({ release_notes: "", name: "未命名草稿" }),
       });
       setNotice("Draft created from the active configuration.");
       await loadPage(created.draft_id);
@@ -338,6 +353,7 @@ export function ConfigurationPage({
         },
       );
       setDraft(validated);
+      setDraftName(validated.name || "");
       setEditable(clone(validated.snapshot));
       setReleaseNotes(validated.release_notes);
       setNotice(
@@ -409,6 +425,37 @@ export function ConfigurationPage({
     });
   }
 
+  async function saveModelCatalog() {
+    await perform(async () => {
+      await api("/admin/api/configuration/model-catalog", {
+        method: "PUT",
+        headers: writeHeaders(),
+        body: JSON.stringify({ models: selectedDiscoveredModels }),
+      });
+      setModelMenuOpen(false);
+      setNotice("模型清单已保存。");
+    });
+  }
+
+  function addDraftModel() {
+    const alias = newAlias.trim();
+    if (!alias || !editable || editable.llms[alias]) return;
+    mutate((snapshot) => {
+      snapshot.llms[alias] = { model: alias, description: "", max_tokens: 4096, context_limit: 32768 };
+      snapshot.router.allowed_models = [...new Set([...snapshot.router.allowed_models, alias])].sort();
+    });
+    setNewAlias("");
+  }
+
+  function removeDraftModel(alias: string) {
+    if (!editable || Object.keys(editable.llms).length <= 1) return;
+    mutate((snapshot) => {
+      delete snapshot.llms[alias];
+      snapshot.router.allowed_models = snapshot.router.allowed_models.filter((item) => item !== alias);
+      if (snapshot.router.default_model === alias) snapshot.router.default_model = null;
+    });
+  }
+
   async function runLab() {
     if (!labText.trim()) return;
     await perform(async () => {
@@ -439,17 +486,17 @@ export function ConfigurationPage({
   }
 
   if (loading && !summary) {
-    return <div className="state">Loading configuration…</div>;
+    return <div className="state">正在加载配置…</div>;
   }
 
   if (!summary) {
     return error
       ? <div className="error" role="alert">{error}</div>
-      : <div className="state">Configuration data is unavailable.</div>;
+      : <div className="state">配置数据不可用。</div>;
   }
 
   const active = summary.active;
-  const aliases = Object.keys(active.snapshot.llms).sort();
+  const aliases = Object.keys(editable?.llms || active.snapshot.llms).sort();
   const editableDraft = draft?.status !== "finalized";
 
   return (
@@ -457,69 +504,77 @@ export function ConfigurationPage({
       {error && <div className="error" role="alert">{error}</div>}
       {notice && <div className="notice" role="status">{notice}</div>}
 
-      <section className="cards configuration-summary" aria-label="Configuration summary">
-        <Metric label="Active version" value={`v${active.version_number}`} hint={active.source} />
-        <Metric label="Runtime state" value="Active" hint="Atomic activation enabled" />
-        <Metric label="Drafts" value={String(summary.drafts.length)} hint="maximum 100 listed" />
-        <Metric label="Pending versions" value={String(versions?.items.filter((item) => item.publish_state === "pending").length || 0)} />
-      </section>
+      {view === "configuration" && <section className="cards configuration-summary" aria-label="配置摘要">
+        <Metric label="当前版本" value={`v${active.version_number}`} hint={active.source} />
+        <Metric label="运行状态" value="已启用" hint="支持原子启用" />
+        <Metric label="草稿数量" value={String(summary.drafts.length)} hint="最多显示 100 条" />
+        <Metric label="待发布版本" value={String(versions?.items.filter((item) => item.publish_state === "pending").length || 0)} />
+      </section>}
 
-      <section className="panel">
+      {view === "configuration" && <section className="panel">
         <div className="panel-title configuration-title">
           <div>
-            <h2>Configuration drafts</h2>
-            <span>Drafts are validated before atomic activation; rollback creates a new immutable version.</span>
+            <h2>配置草稿</h2>
+          <span>草稿需先校验，再进行原子启用；回滚会生成新的不可变版本。</span>
           </div>
-          <button onClick={() => void createDraft()} disabled={actionBusy}>Create draft</button>
+          <button onClick={() => void createDraft()} disabled={actionBusy}>新建草稿</button>
         </div>
         <label className="field compact-field" htmlFor="draft-selector">
-          <span>Selected draft</span>
+          <span>当前草稿</span>
           <select
             id="draft-selector"
             value={selectedId}
             onChange={(event) => setSelectedId(event.target.value)}
           >
-            <option value="">No draft selected</option>
+            <option value="">未选择草稿</option>
             {summary.drafts.map((item) => (
               <option key={item.draft_id} value={item.draft_id}>
-                {item.status} · revision {item.revision} · {item.draft_id.slice(0, 10)}
+                {item.name || "未命名草稿"} · {item.status} · 修订 {item.revision}{item.is_active ? " · 已启用" : ""}
               </option>
             ))}
           </select>
         </label>
-        {!summary.drafts.length && <div className="state">No drafts. Create one from the active version.</div>}
-      </section>
+        {!summary.drafts.length && <div className="state">暂无草稿，请从当前版本新建。</div>}
+      </section>}
 
-      {draftLoading && <div className="state">Loading draft…</div>}
-      {draft && editable && !draftLoading && (
+      {view === "configuration" && <section className="panel">
+        <div className="panel-title"><h2>模型清单</h2><span>发现后勾选可用于草稿的模型</span></div>
+        <button className="secondary" onClick={() => { setModelMenuOpen(true); void runDiscovery(); }} disabled={actionBusy}>发现可用模型</button>
+        {modelMenuOpen && <div className="model-menu"><input placeholder="模糊搜索模型" value={modelSearch} onChange={(event) => setModelSearch(event.target.value)} />{(discovery?.models || summary.model_catalog || []).filter((model) => model.toLowerCase().includes(modelSearch.toLowerCase())).map((model) => <label key={model}><input type="checkbox" checked={selectedDiscoveredModels.includes(model)} onChange={(event) => setSelectedDiscoveredModels((current) => event.target.checked ? [...new Set([...current, model])] : current.filter((item) => item !== model))} />{model}</label>)}<div className="actions"><button onClick={() => void saveModelCatalog()}>确认</button><button className="secondary" onClick={() => setModelMenuOpen(false)}>取消</button></div></div>}
+      </section>}
+
+      {draftLoading && <div className="state">正在加载草稿…</div>}
+      {view === "configuration" && draft && editable && !draftLoading && (
         <>
           <section className="panel">
             <div className="panel-title configuration-title">
               <div>
-                <h2>Draft editor</h2>
+                <h2>草稿编辑器</h2>
                 <span>
-                  {draft.status} · revision {draft.revision}
-                  {dirty ? " · unsaved changes" : " · saved"}
+                  {draft.status} · 修订 {draft.revision}
+                  {dirty ? " · 未保存" : " · 已保存"}
                 </span>
               </div>
+              <label className="field compact-field"><span>草稿名称</span><input value={draftName} onChange={(event) => setDraftName(event.target.value)} /></label>
               <div className="actions">
+                <button className="secondary" disabled={actionBusy} onClick={() => void perform(async () => { const updated = await api<Draft>(`/admin/api/configuration/drafts/${encodeURIComponent(draft.draft_id)}/activation`, { method: "POST", headers: writeHeaders(), body: JSON.stringify({ active: !draft.is_active }) }); setDraft(updated); await loadPage(draft.draft_id); })}>{draft.is_active ? "停用" : "启用"}</button>
                 <button
                   className="secondary"
                   onClick={() => void perform(async () => {
                     await saveDraft();
-                    setNotice("Draft saved. Validate it before finalization.");
+                    setNotice("草稿已保存，请先校验再发布。");
                     await loadPage(draft.draft_id);
                   })}
                   disabled={actionBusy || !editableDraft || !dirty}
                 >
-                  Save draft
+                  保存草稿
                 </button>
                 <button
                   className="secondary"
                   onClick={() => void validateDraft()}
                   disabled={actionBusy || !editableDraft}
                 >
-                  Validate
+                  校验
                 </button>
                 <button
                   onClick={() => void finalizeDraft()}
@@ -531,21 +586,21 @@ export function ConfigurationPage({
                     !releaseNotes.trim()
                   }
                 >
-                  Finalize pending version
+                  生成待发布版本
                 </button>
                 <button
                   className="danger"
                   onClick={() => void deleteDraft()}
                   disabled={actionBusy || !editableDraft}
                 >
-                  Delete draft
+                  删除草稿
                 </button>
               </div>
             </div>
 
             {draft.validation_issues.length > 0 && (
               <div className="validation" role="alert">
-                <strong>Validation issues</strong>
+                <strong>校验问题</strong>
                 <ul>
                   {draft.validation_issues.map((issue) => (
                     <li key={`${issue.path}:${issue.code}`}>
@@ -557,22 +612,22 @@ export function ConfigurationPage({
             )}
 
             <fieldset disabled={!editableDraft || actionBusy}>
-              <legend>Router</legend>
+              <legend>路由器</legend>
               <div className="form-grid">
-                <Field label="Judge model" htmlFor="judge-model">
+                <Field label="判断模型" htmlFor="judge-model">
                   <input
                     id="judge-model"
                     value={editable.router.judge_model || ""}
                     onChange={(event) => mutate((snapshot) => { snapshot.router.judge_model = event.target.value || null; })}
                   />
                 </Field>
-                <Field label="Default model" htmlFor="default-model">
+                <Field label="默认模型" htmlFor="default-model">
                   <select
                     id="default-model"
                     value={editable.router.default_model || ""}
                     onChange={(event) => mutate((snapshot) => { snapshot.router.default_model = event.target.value || null; })}
                   >
-                    <option value="">None</option>
+                    <option value="">无</option>
                     {aliases.map((alias) => <option key={alias} value={alias}>{alias}</option>)}
                   </select>
                 </Field>
@@ -580,8 +635,8 @@ export function ConfigurationPage({
                 <NumberField label="Judge token budget" id="judge-tokens" value={editable.router.judge_max_tokens} onChange={(value) => mutate((snapshot) => { snapshot.router.judge_max_tokens = value; })} />
                 <NumberField label="Routing context characters" id="routing-context" value={editable.router.routing_context_chars} onChange={(value) => mutate((snapshot) => { snapshot.router.routing_context_chars = value; })} />
               </div>
-              <div className="checkbox-group" aria-label="Allowed models">
-                <span>Allowed models</span>
+              <div className="checkbox-group" aria-label="可用模型">
+                <span>可用模型</span>
                 {aliases.map((alias) => (
                   <label key={alias}>
                     <input
@@ -597,7 +652,7 @@ export function ConfigurationPage({
                   </label>
                 ))}
               </div>
-              <Field label="Judge system prompt" htmlFor="judge-prompt">
+              <Field label="判断系统提示词" htmlFor="judge-prompt">
                 <textarea
                   id="judge-prompt"
                   rows={8}
@@ -608,7 +663,7 @@ export function ConfigurationPage({
             </fieldset>
 
             <fieldset disabled={!editableDraft || actionBusy}>
-              <legend>Session routing</legend>
+              <legend>会话路由</legend>
               <div className="checkbox-group">
                 <label><input type="checkbox" checked={editable.session_routing.enabled} onChange={(event) => mutate((snapshot) => { snapshot.session_routing.enabled = event.target.checked; })} />Enabled</label>
                 <label><input type="checkbox" checked={editable.session_routing.rejudge_on_modality_change} onChange={(event) => mutate((snapshot) => { snapshot.session_routing.rejudge_on_modality_change = event.target.checked; })} />Rejudge on modality change</label>
@@ -634,11 +689,11 @@ export function ConfigurationPage({
             </fieldset>
 
             <fieldset disabled={!editableDraft || actionBusy}>
-              <legend>Configured backends</legend>
+              <legend>已配置模型</legend>
               <div className="backend-grid">
                 {aliases.map((alias) => (
                   <article className="backend-card" key={alias}>
-                    <h3>{alias}</h3>
+                    <h3>{alias} <button type="button" className="danger compact-remove" onClick={() => removeDraftModel(alias)}>删除</button></h3>
                     <Field label={`${alias} upstream model`} htmlFor={`model-${alias}`}>
                       <input id={`model-${alias}`} value={editable.llms[alias].model} onChange={(event) => mutate((snapshot) => { snapshot.llms[alias].model = event.target.value; })} />
                     </Field>
@@ -650,14 +705,15 @@ export function ConfigurationPage({
                       <NumberField label={`${alias} context limit`} id={`context-${alias}`} value={editable.llms[alias].context_limit} onChange={(value) => mutate((snapshot) => { snapshot.llms[alias].context_limit = value; })} />
                     </div>
                     <small>
-                      {summary.read_only.models[alias]?.provider || "unknown provider"} · credential {summary.read_only.models[alias]?.credential.configured ? "configured" : "missing"}
+                      {summary.read_only.models[alias]?.provider || "未知提供方"} · 凭据 {summary.read_only.models[alias]?.credential.configured ? "已配置" : "缺失"}
                     </small>
                   </article>
                 ))}
               </div>
+              <div className="actions model-add-row"><input value={newAlias} onChange={(event) => setNewAlias(event.target.value)} placeholder="输入模型别名" /><button type="button" className="secondary" onClick={addDraftModel}>添加模型</button></div>
             </fieldset>
 
-            <Field label="Release notes" htmlFor="release-notes">
+            <Field label="发布说明" htmlFor="release-notes">
               <textarea
                 id="release-notes"
                 rows={4}
@@ -671,32 +727,32 @@ export function ConfigurationPage({
 
           <div className="configuration-columns">
             <section className="panel">
-              <div className="panel-title"><h2>Stable diff</h2><span>{diff?.changes.length || 0} changes</span></div>
-              {!diff?.changes.length ? <div className="state">No saved differences from the base version.</div> : (
+              <div className="panel-title"><h2>稳定差异</h2><span>{diff?.changes.length || 0} 项变更</span></div>
+              {!diff?.changes.length ? <div className="state">相对基础版本没有已保存的差异。</div> : (
                 <div className="diff-list">
                   {diff.changes.map((change) => (
                     <article key={change.path}>
                       <code>{change.path}</code>
-                      <div><span>Before</span><pre>{formatValue(change.before)}</pre></div>
-                      <div><span>After</span><pre>{formatValue(change.after)}</pre></div>
+                      <div><span>修改前</span><pre>{formatValue(change.before)}</pre></div>
+                      <div><span>修改后</span><pre>{formatValue(change.after)}</pre></div>
                     </article>
                   ))}
                 </div>
               )}
             </section>
             <section className="panel">
-              <div className="panel-title"><h2>Managed YAML</h2><span>Read only</span></div>
-              <pre className="yaml-view" aria-label="Managed configuration YAML">{toYaml(editable)}</pre>
+              <div className="panel-title"><h2>托管配置 YAML</h2><span>只读</span></div>
+              <pre className="yaml-view" aria-label="托管配置 YAML">{toYaml(editable)}</pre>
             </section>
           </div>
         </>
       )}
 
-      <div className="configuration-columns">
+      {view === "activity" && <div className="configuration-columns">
         <section className="panel">
-          <div className="panel-title"><h2>Version history</h2><span>Immutable snapshots</span></div>
-          {!versions?.items.length ? <div className="state">No configuration versions.</div> : (
-            <div className="table-wrap"><table className="compact-table"><thead><tr><th>Version</th><th>State</th><th>Source</th><th>Created</th><th>Release notes</th><th>Actions</th></tr></thead><tbody>
+          <div className="panel-title"><h2>版本历史</h2><span>不可变快照</span></div>
+          {!versions?.items.length ? <div className="state">暂无配置版本。</div> : (
+            <div className="table-wrap"><table className="compact-table"><thead><tr><th>版本</th><th>状态</th><th>来源</th><th>创建时间</th><th>发布说明</th><th>操作</th></tr></thead><tbody>
               {versions.items.map((item) => <tr key={item.version_id}>
                 <td>v{item.version_number}</td>
                 <td><span className={`status ${item.publish_state}`}>{item.publish_state}</span></td>
@@ -704,16 +760,16 @@ export function ConfigurationPage({
                 <td>{new Date(item.created_at).toLocaleString()}</td>
                 <td>{item.release_notes || "—"}</td>
                 <td><div className="actions compact-actions">
-                  {!item.is_active && <button className="secondary" disabled={actionBusy} onClick={() => void activateVersion(item)}>Activate</button>}
-                  {!item.is_active && <button className="danger" disabled={actionBusy} onClick={() => void rollbackVersion(item)}>Rollback</button>}
+                  {!item.is_active && <button className="secondary" disabled={actionBusy} onClick={() => void activateVersion(item)}>启用</button>}
+                  {!item.is_active && <button className="danger" disabled={actionBusy} onClick={() => void rollbackVersion(item)}>回滚</button>}
                 </div></td>
               </tr>)}
             </tbody></table></div>
           )}
         </section>
         <section className="panel">
-          <div className="panel-title"><h2>Recent audit</h2><span>No request or prompt bodies</span></div>
-          {!audit?.items.length ? <div className="state">No recent management events.</div> : (
+          <div className="panel-title"><h2>最近审计</h2><span>不记录请求或提示词正文</span></div>
+          {!audit?.items.length ? <div className="state">暂无管理事件。</div> : (
             <div className="audit-list">
               {audit.items.map((item) => <article key={item.audit_id}>
                 <div><strong>{item.action}</strong><span className={`status ${item.outcome}`}>{item.outcome}</span></div>
@@ -723,32 +779,23 @@ export function ConfigurationPage({
             </div>
           )}
         </section>
-      </div>
+      </div>}
 
-      <div className="configuration-columns">
+      {view === "route-lab" && <div className="configuration-columns">
         <section className="panel">
-          <div className="panel-title"><h2>Route Lab</h2><span>Admin test only; input is not persisted</span></div>
-          <Field label="Task text" htmlFor="route-lab-text">
-            <textarea id="route-lab-text" rows={5} value={labText} onChange={(event) => setLabText(event.target.value)} placeholder="Enter a temporary routing task" />
+          <div className="panel-title"><h2>Route Lab</h2><span>仅用于管理员测试，不会保存输入</span></div>
+          <Field label="任务文本" htmlFor="route-lab-text">
+            <textarea id="route-lab-text" rows={5} value={labText} onChange={(event) => setLabText(event.target.value)} placeholder="输入临时路由任务" />
           </Field>
           <div className="form-grid">
-            <Field label="Version ID (optional)" htmlFor="route-lab-version">
+            <Field label="版本 ID（可选）" htmlFor="route-lab-version">
               <input id="route-lab-version" value={labVersionId} onChange={(event) => setLabVersionId(event.target.value)} inputMode="numeric" />
             </Field>
-            <div className="actions"><button onClick={() => void runLab()} disabled={actionBusy || !labText.trim()}>Evaluate route</button></div>
+            <div className="actions"><button onClick={() => void runLab()} disabled={actionBusy || !labText.trim()}>评估路由</button></div>
           </div>
-          {labResult && <div className="notice">Selected <strong>{labResult.result.selected_model}</strong> · {labResult.result.judge_status} · {labResult.result.judge_latency_ms == null ? "no judge" : `${labResult.result.judge_latency_ms.toFixed(1)} ms`} · persisted: no</div>}
+          {labResult && <div className="notice">已选择 <strong>{labResult.result.selected_model}</strong> · {labResult.result.judge_status} · {labResult.result.judge_latency_ms == null ? "未使用判断模型" : `${labResult.result.judge_latency_ms.toFixed(1)} ms`} · 不会持久化</div>}
         </section>
-        <section className="panel">
-          <div className="panel-title"><h2>Upstream model discovery</h2><span>Read only; Combo recursion is not verified</span></div>
-          <button className="secondary" onClick={() => void runDiscovery()} disabled={actionBusy}>Check configured router models</button>
-          {discovery && <div className={discovery.status === "ok" ? "notice" : "validation"}>
-            <strong>{discovery.status}</strong>
-            {discovery.models.length > 0 ? <ul>{discovery.models.map((model) => <li key={model}><code>{model}</code></li>)}</ul> : <p>{discovery.reason || "No models returned."}</p>}
-            <small>Model ID existence does not prove Combo internal recursion safety.</small>
-          </div>}
-        </section>
-      </div>
+      </div>}
     </div>
   );
 }

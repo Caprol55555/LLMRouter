@@ -62,6 +62,17 @@ class AdminAuthService:
     def configured(self) -> bool:
         return bool(self._admin_token_digest)
 
+    def change_token(self, current: str, new: str) -> bool:
+        """Replace the administrator token for the current process."""
+        if not isinstance(current, str) or not isinstance(new, str) or not (1 <= len(new) <= 4096):
+            return False
+        with self._lock:
+            if not self._admin_token_digest or not hmac.compare_digest(_digest(current), self._admin_token_digest):
+                return False
+            self._admin_token_digest = _digest(new)
+            self._sessions.clear()
+            return True
+
     def login(self, candidate: str, client_key: str) -> tuple[Optional[AdminSession], str]:
         now = self._clock()
         with self._lock:
