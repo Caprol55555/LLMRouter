@@ -2,6 +2,10 @@ import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { ApiError, api } from "./api";
 import { ConfigurationPage } from "./configuration";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./components/ui/dialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./components/ui/select";
+import { Tabs, TabsList, TabsTrigger } from "./components/ui/tabs";
+import { Toast } from "./components/ui/toast";
 import "./styles.css";
 
 type WindowSummary = {
@@ -78,6 +82,9 @@ function translateValue(value: string | null | undefined): string {
     deployment_smoke: "部署冒烟",
     success_rate: "成功率",
     ok: "正常",
+    healthy: "正常",
+    degraded: "降级",
+    failed: "失败",
     unknown: "未知",
   };
   return value && labels[value] ? labels[value] : value || "—";
@@ -88,7 +95,11 @@ function fmtNumber(value: number | null, suffix = "") {
 }
 
 function fmtDate(value: string | undefined) {
-  return value ? new Date(value).toLocaleString() : "未知";
+  return value ? new Date(value).toLocaleString("zh-CN") : "未知";
+}
+
+function windowLabel(value: "1h" | "24h" | "7d") {
+  return value === "1h" ? "最近 1 小时" : value === "24h" ? "最近 24 小时" : "最近 7 天";
 }
 
 export function App() {
@@ -249,12 +260,11 @@ export function App() {
       <div className="deployment-banner">最后更新部署时间：<strong>{fmtDate(runtime?.deployment_time)}</strong></div>
 
       {error && <Toast message={error} tone="error" onClose={() => setError("")} />}
-      <nav className="primary-nav" aria-label="管理中心页面">
-        <button className={section === "overview" ? "active" : "secondary"} onClick={() => setSection("overview")}>概览</button>
-        <button className={section === "activity" ? "active" : "secondary"} onClick={() => setSection("activity")}>活动记录</button>
-        <button className={section === "configuration" ? "active" : "secondary"} onClick={() => setSection("configuration")}>配置</button>
-        <button className={section === "route-lab" ? "active" : "secondary"} onClick={() => setSection("route-lab")}>路由测试</button>
-      </nav>
+      <Tabs value={section} onValueChange={(value) => setSection(value as typeof section)}>
+        <TabsList className="primary-nav" aria-label="管理中心页面">
+          <TabsTrigger value="overview">概览</TabsTrigger><TabsTrigger value="activity">活动记录</TabsTrigger><TabsTrigger value="configuration">配置</TabsTrigger><TabsTrigger value="route-lab">路由测试</TabsTrigger>
+        </TabsList>
+      </Tabs>
 
       {section === "configuration" ? (
         <ConfigurationPage csrf={csrf} onUnauthorized={() => setAuthenticated(false)} view="configuration" />
@@ -267,33 +277,27 @@ export function App() {
         </>
       ) : (
         <>
-          <nav aria-label="统计时间范围">
-            {(["1h", "24h", "7d"] as const).map((item) => (
-              <button key={item} className={windowKey === item ? "active" : "secondary"} onClick={() => setWindowKey(item)}>{{ "1h": "1 小时", "24h": "24 小时", "7d": "7 天" }[item]}</button>
-            ))}
-          </nav>
+          <Tabs value={windowKey} onValueChange={(value) => setWindowKey(value as typeof windowKey)}>
+            <TabsList className="range-tabs" aria-label="统计时间范围"><TabsTrigger value="1h">1 小时</TabsTrigger><TabsTrigger value="24h">24 小时</TabsTrigger><TabsTrigger value="7d">7 天</TabsTrigger></TabsList>
+          </Tabs>
           {loading && !overview ? <div className="state">正在加载遥测数据…</div> : summary && (
             <>
-          <section className="overview-hero">
-            <div><span className="eyebrow">运行总览 · {windowKey === "1h" ? "最近 1 小时" : windowKey === "24h" ? "最近 24 小时" : "最近 7 天"}</span><h2>路由运行得怎么样？</h2><p>从请求量、成功率、缓存和延迟四个维度快速判断当前服务状态。</p></div>
-            <div className="hero-status"><span className={`health-dot ${health?.status === "ok" ? "ok" : "warn"}`} />{health?.status === "ok" ? "运行正常" : "需要关注"}</div>
-          </section>
-          <section className="cards overview-metrics" aria-label="概览指标">
+          <section className="overview-metrics-section" aria-label="概览指标"><div className="section-heading"><div><span className="eyebrow">运行指标</span><h2>{windowKey === "1h" ? "最近 1 小时" : windowKey === "24h" ? "最近 24 小时" : "最近 7 天"}</h2></div><div className="hero-status"><span className={`health-dot ${health?.status === "ok" ? "ok" : "warn"}`} />{health?.status === "ok" ? "运行正常" : "需要关注"}</div></div><div className="cards overview-metrics">
             <Metric label="外部请求" value={String(summary.request_count)} />
             <Metric label="判断调用" value={`${summary.judge_calls} · ${summary.judge_amplification.toFixed(2)}×`} />
             <Metric label="缓存命中" value={`${(summary.cache_hit_rate * 100).toFixed(1)}%`} />
             <Metric label="成功率" value={`${(summary.success_rate * 100).toFixed(1)}%`} />
             <Metric label="总延迟" value={`${fmtNumber(summary.total_latency_ms.p50, " ms")} / ${fmtNumber(summary.total_latency_ms.p95, " ms")}`} hint="p50 / p95" />
             <Metric label="判断延迟" value={`${fmtNumber(summary.judge_latency_ms.p50, " ms")} / ${fmtNumber(summary.judge_latency_ms.p95, " ms")}`} hint="p50 / p95" />
-            <Metric label="遥测状态" value={health?.telemetry?.status || health?.database.status || "未知"} hint={`队列 ${health?.telemetry?.queue_depth ?? 0}`} />
+            <Metric label="遥测状态" value={translateValue(health?.telemetry?.status || health?.database.status)} hint={`队列 ${health?.telemetry?.queue_depth ?? 0}`} />
             <Metric label="丢弃事件" value={String(health?.telemetry?.dropped_events ?? 0)} hint={`${health?.telemetry?.database_errors ?? 0} 个数据库错误`} />
-          </section>
+          </div></section>
           <section className="overview-analysis">
             <article className="panel analysis-panel"><div className="panel-title"><h2>请求健康度</h2><span>成功与异常</span></div><div className="analysis-bars"><AnalysisBar label="成功请求" value={summary.success_rate * 100} display={`${(summary.success_rate * 100).toFixed(1)}%`} tone="good" /><AnalysisBar label="回退请求" value={summary.request_count ? (summary.fallback_count / summary.request_count) * 100 : 0} display={`${summary.fallback_count} 次`} tone="warn" /><AnalysisBar label="错误请求" value={summary.request_count ? (summary.error_count / summary.request_count) * 100 : 0} display={`${summary.error_count} 次`} tone="bad" /></div></article>
             <article className="panel analysis-panel"><div className="panel-title"><h2>延迟概览</h2><span>毫秒</span></div><div className="latency-grid"><LatencyStat label="总延迟 p50" value={fmtNumber(summary.total_latency_ms.p50)} /><LatencyStat label="总延迟 p95" value={fmtNumber(summary.total_latency_ms.p95)} /><LatencyStat label="判断 p50" value={fmtNumber(summary.judge_latency_ms.p50)} /><LatencyStat label="判断 p95" value={fmtNumber(summary.judge_latency_ms.p95)} /></div></article>
           </section>
           <section className="panel distribution">
-            <div className="panel-title"><h2>模型分布</h2><span>{windowKey}</span></div>
+            <div className="panel-title"><h2>模型分布</h2><span>{windowLabel(windowKey)}</span></div>
             {summary.model_distribution.length === 0 ? <div className="state">此时间范围内没有路由请求。</div> : summary.model_distribution.map((item) => (
               <div className="bar-row" key={item.model || "unknown"}>
                 <span>{item.model || "未知"}</span>
@@ -308,7 +312,7 @@ export function App() {
         </>
       )}
       {passwordNotice && !passwordOpen && <Toast message={passwordNotice} onClose={() => setPasswordNotice("")} />}
-      {passwordOpen && <div className="modal-backdrop"><form className="modal" onSubmit={changePassword}><div className="panel-title"><h2>修改密码</h2><button type="button" className="secondary" onClick={() => setPasswordOpen(false)}>关闭</button></div><label className="field"><span>当前密码</span><input type="password" value={passwordForm.current} onChange={(e) => setPasswordForm({ ...passwordForm, current: e.target.value })} required /></label><label className="field"><span>新密码</span><input type="password" minLength={8} value={passwordForm.next} onChange={(e) => setPasswordForm({ ...passwordForm, next: e.target.value })} required /></label><label className="field"><span>确认新密码</span><input type="password" minLength={8} value={passwordForm.confirm} onChange={(e) => setPasswordForm({ ...passwordForm, confirm: e.target.value })} required /></label>{passwordNotice && <div className="error">{passwordNotice}</div>}<button type="submit">保存密码</button></form></div>}
+      <Dialog open={passwordOpen} onOpenChange={setPasswordOpen}><DialogContent><DialogHeader><DialogTitle>修改密码</DialogTitle><DialogDescription>修改后需要使用新密码重新登录。</DialogDescription></DialogHeader><form className="modal-form" onSubmit={changePassword}><label className="field"><span>当前密码</span><input type="password" value={passwordForm.current} onChange={(e) => setPasswordForm({ ...passwordForm, current: e.target.value })} required /></label><label className="field"><span>新密码</span><input type="password" minLength={8} value={passwordForm.next} onChange={(e) => setPasswordForm({ ...passwordForm, next: e.target.value })} required /></label><label className="field"><span>确认新密码</span><input type="password" minLength={8} value={passwordForm.confirm} onChange={(e) => setPasswordForm({ ...passwordForm, confirm: e.target.value })} required /></label>{passwordNotice && <div className="error">{passwordNotice}</div>}<div className="dialog-actions"><button type="submit">保存密码</button></div></form></DialogContent></Dialog>
     </main>
   );
 }
@@ -343,15 +347,7 @@ function RequestsPanel({
   page: number;
   setPage: (value: number | ((value: number) => number)) => void;
 }) {
-  return <section className="panel"><div className="panel-title"><h2>请求记录</h2><span>仅展示结构化元数据</span></div><div className="filters"><select aria-label="请求时间范围" value={requestWindow} onChange={(event) => { setPage(1); setRequestWindow(event.target.value as "1h" | "24h" | "7d"); }}><option value="1h">最近 1 小时</option><option value="24h">最近 24 小时</option><option value="7d">最近 7 天</option></select><select aria-label="流量类型" value={trafficClass} onChange={(event) => { setPage(1); setTrafficClass(event.target.value); }}><option value="">全部流量</option><option value="production">生产流量</option><option value="admin_test">管理员测试</option><option value="deployment_smoke">部署冒烟</option></select><select aria-label="已选模型" value={selectedModel} onChange={(event) => { setPage(1); setSelectedModel(event.target.value); }}><option value="">全部模型</option>{runtime?.models.map((model) => <option key={model.name} value={model.name}>{model.name}</option>)}</select><select aria-label="最终状态" value={finalStatus} onChange={(event) => { setPage(1); setFinalStatus(event.target.value); }}><option value="">全部状态</option><option value="success">成功</option><option value="error">错误</option><option value="disconnected">断开</option></select></div>{loading && !requests ? <div className="state">正在加载请求记录…</div> : !requests?.items.length ? <div className="state">没有符合条件的请求。</div> : <div className="table-wrap"><table><thead><tr><th>时间</th><th>请求</th><th>策略</th><th>缓存 / 判断</th><th>模型</th><th>状态</th><th>延迟</th><th>令牌</th></tr></thead><tbody>{requests.items.map((item) => <tr key={item.event_id}><td>{new Intl.DateTimeFormat(undefined, { dateStyle: "short", timeStyle: "medium" }).format(new Date(item.occurred_at))}</td><td><code>{item.request_id.slice(0, 12)}</code><small>{translateValue(item.traffic_class)}</small></td><td>{item.requested_model}<small>{translateValue(item.rejudge_reason)}</small></td><td>{translateValue(item.cache_status)}<small>{translateValue(item.judge_status)}</small></td><td>{item.selected_model || "—"}</td><td><span className={`status ${item.final_status}`}>{translateValue(item.final_status)}</span></td><td>{fmtNumber(item.total_latency_ms, " ms")}</td><td>{item.total_tokens ?? "—"}</td></tr>)}</tbody></table></div>}<div className="pagination"><button className="secondary" disabled={!requests || page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</button><span>第 {page} 页 · {requests?.total ?? 0} 条</span><button className="secondary" disabled={!requests || page * requests.page_size >= requests.total} onClick={() => setPage((value) => value + 1)}>下一页</button></div></section>;
-}
-
-function Toast({ message, tone = "success", onClose }: { message: string; tone?: "success" | "error"; onClose: () => void }) {
-  useEffect(() => {
-    const timer = window.setTimeout(onClose, 4200);
-    return () => window.clearTimeout(timer);
-  }, [message, onClose]);
-  return <div className={`toast ${tone}`} role={tone === "error" ? "alert" : "status"}><span>{message}</span><button className="toast-close" type="button" aria-label="关闭通知" onClick={onClose}>×</button></div>;
+  return <section className="panel"><div className="panel-title"><h2>请求记录</h2><span>仅展示结构化元数据</span></div><div className="filters"><Select value={requestWindow} onValueChange={(value) => { setPage(1); setRequestWindow(value as "1h" | "24h" | "7d"); }}><SelectTrigger aria-label="请求时间范围"><SelectValue placeholder="时间范围" /></SelectTrigger><SelectContent><SelectItem value="1h">最近 1 小时</SelectItem><SelectItem value="24h">最近 24 小时</SelectItem><SelectItem value="7d">最近 7 天</SelectItem></SelectContent></Select><Select value={trafficClass || "all"} onValueChange={(value) => { setPage(1); setTrafficClass(value === "all" ? "" : value); }}><SelectTrigger aria-label="流量类型"><SelectValue placeholder="流量类型" /></SelectTrigger><SelectContent><SelectItem value="all">全部流量</SelectItem><SelectItem value="production">生产流量</SelectItem><SelectItem value="admin_test">管理员测试</SelectItem><SelectItem value="deployment_smoke">部署冒烟</SelectItem></SelectContent></Select><Select value={selectedModel || "all"} onValueChange={(value) => { setPage(1); setSelectedModel(value === "all" ? "" : value); }}><SelectTrigger aria-label="已选模型"><SelectValue placeholder="模型" /></SelectTrigger><SelectContent><SelectItem value="all">全部模型</SelectItem>{runtime?.models.map((model) => <SelectItem key={model.name} value={model.name}>{model.name}</SelectItem>)}</SelectContent></Select><Select value={finalStatus || "all"} onValueChange={(value) => { setPage(1); setFinalStatus(value === "all" ? "" : value); }}><SelectTrigger aria-label="最终状态"><SelectValue placeholder="最终状态" /></SelectTrigger><SelectContent><SelectItem value="all">全部状态</SelectItem><SelectItem value="success">成功</SelectItem><SelectItem value="error">错误</SelectItem><SelectItem value="disconnected">断开</SelectItem></SelectContent></Select></div>{loading && !requests ? <div className="state">正在加载请求记录…</div> : !requests?.items.length ? <div className="state">没有符合条件的请求。</div> : <div className="table-wrap"><table><thead><tr><th>时间</th><th>请求</th><th>策略</th><th>缓存 / 判断</th><th>模型</th><th>状态</th><th>延迟</th><th>令牌</th></tr></thead><tbody>{requests.items.map((item) => <tr key={item.event_id}><td>{new Intl.DateTimeFormat("zh-CN", { dateStyle: "short", timeStyle: "medium" }).format(new Date(item.occurred_at))}</td><td><code>{item.request_id.slice(0, 12)}</code><small>{translateValue(item.traffic_class)}</small></td><td>{item.requested_model}<small>{translateValue(item.rejudge_reason)}</small></td><td>{translateValue(item.cache_status)}<small>{translateValue(item.judge_status)}</small></td><td>{item.selected_model || "—"}</td><td><span className={`status ${item.final_status}`}>{translateValue(item.final_status)}</span></td><td>{fmtNumber(item.total_latency_ms, " ms")}</td><td>{item.total_tokens ?? "—"}</td></tr>)}</tbody></table></div>}<div className="pagination"><button className="secondary" disabled={!requests || page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</button><span>第 {page} 页 · {requests?.total ?? 0} 条</span><button className="secondary" disabled={!requests || page * requests.page_size >= requests.total} onClick={() => setPage((value) => value + 1)}>下一页</button></div></section>;
 }
 
 const root = document.getElementById("root");

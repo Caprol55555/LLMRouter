@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { ApiError, api } from "./api";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./components/ui/dialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./components/ui/select";
+import { Toast } from "./components/ui/toast";
 
 type ValidationIssue = { code: string; path: string; message: string };
 type ManagedSnapshot = {
@@ -155,8 +158,37 @@ function translateAuditAction(value: string): string {
     login: "登录",
     logout: "退出登录",
     integrity_check: "检查数据完整性",
+    version_activated: "启用配置版本",
+    version_rolled_back: "回滚配置版本",
   };
-  return labels[value] || value;
+  return labels[value] || "其他管理操作";
+}
+
+function translateSubjectType(value: string | null): string {
+  const labels: Record<string, string> = {
+    system: "系统",
+    configuration_version: "配置版本",
+    configuration_draft: "智能路由版本",
+  };
+  return value && labels[value] ? labels[value] : "系统";
+}
+
+function formatAuditSummary(summary: Record<string, unknown>): string {
+  const labels: Record<string, string> = {
+    version_number: "版本号",
+    from_version_id: "原版本",
+    to_version_id: "目标版本",
+    target_version_id: "回滚目标",
+    new_version_id: "新版本",
+    base_version_id: "基础版本",
+    revision: "修订号",
+    issue_count: "问题数",
+    draft_id: "智能路由版本标识",
+    active: "启用状态",
+  };
+  return Object.entries(summary)
+    .map(([key, value]) => `${labels[key] || "其他信息"}：${typeof value === "boolean" ? (value ? "是" : "否") : String(value)}`)
+    .join(" · ") || "无附加信息";
 }
 
 function translateValidationMessage(value: string): string {
@@ -622,7 +654,7 @@ export function ConfigurationPage({
           {summary.model_catalog?.length ? summary.model_catalog.map((model) => <span className="catalog-chip" key={model}>{model}</span>) : <small>尚未配置可用模型</small>}
         </div>
         <button className="secondary" onClick={() => { setModelMenuOpen(true); void runDiscovery(); }} disabled={actionBusy}>发现可用模型</button>
-        {modelMenuOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setModelMenuOpen(false); }}><div className="model-menu model-menu-modal">
+        <Dialog open={modelMenuOpen} onOpenChange={setModelMenuOpen}><DialogContent className="model-menu-dialog"><DialogHeader><DialogTitle>发现可用模型</DialogTitle><DialogDescription>搜索并选择可用于智能路由的上游模型。</DialogDescription></DialogHeader><div className="model-menu">
           <div className="model-menu-toolbar">
             <div className="selected-models" aria-label="已勾选模型">
               <span>已勾选模型</span>
@@ -634,14 +666,12 @@ export function ConfigurationPage({
             {(discovery?.models || summary.model_catalog || []).filter((model) => model.toLowerCase().includes(modelSearch.toLowerCase())).map((model) => <button key={model} type="button" className={`model-option ${selectedDiscoveredModels.includes(model) ? "selected" : ""}`} onClick={() => setSelectedDiscoveredModels((current) => current.includes(model) ? current.filter((item) => item !== model) : [...current, model])}>{selectedDiscoveredModels.includes(model) ? "已选择 · " : ""}{model}</button>)}
           </div>
           <div className="actions model-menu-actions"><button onClick={() => void saveModelCatalog()}>确认</button><button className="secondary" onClick={() => { setSelectedDiscoveredModels(summary.model_catalog || []); setModelSearch(""); setModelMenuOpen(false); }}>取消</button></div>
-        </div></div>}
+        </div></DialogContent></Dialog>
       </section>}
 
       {draftLoading && <div className="state">正在加载智能路由版本…</div>}
       {view === "configuration" && editorOpen && draft && editable && !draftLoading && (
-        <div className="modal-backdrop editor-backdrop">
-          <div className="route-editor-modal">
-            <button type="button" className="secondary editor-close" onClick={() => setEditorOpen(false)}>关闭编辑器</button>
+        <Dialog open={editorOpen} onOpenChange={setEditorOpen}><DialogContent className="route-editor-dialog">
           <section className="panel">
             <div className="panel-title configuration-title">
               <div>
@@ -718,14 +748,10 @@ export function ConfigurationPage({
                   />
                 </Field>
                 <Field label="默认模型" htmlFor="default-model">
-                  <select
-                    id="default-model"
-                    value={editable.router.default_model || ""}
-                    onChange={(event) => mutate((snapshot) => { snapshot.router.default_model = event.target.value || null; })}
-                  >
-                    <option value="">无</option>
-                    {aliases.map((alias) => <option key={alias} value={alias}>{alias}</option>)}
-                  </select>
+                  <Select value={editable.router.default_model || "none"} onValueChange={(value) => mutate((snapshot) => { snapshot.router.default_model = value === "none" ? null : value; })}>
+                    <SelectTrigger id="default-model"><SelectValue placeholder="选择默认模型" /></SelectTrigger>
+                    <SelectContent><SelectItem value="none">无</SelectItem>{aliases.map((alias) => <SelectItem key={alias} value={alias}>{alias}</SelectItem>)}</SelectContent>
+                  </Select>
                 </Field>
                 <NumberField label="判断超时时间（秒）" id="judge-timeout" value={editable.router.judge_timeout_seconds} onChange={(value) => mutate((snapshot) => { snapshot.router.judge_timeout_seconds = value; })} step="0.1" />
                 <NumberField label="判断令牌预算" id="judge-tokens" value={editable.router.judge_max_tokens} onChange={(value) => mutate((snapshot) => { snapshot.router.judge_max_tokens = value; })} />
@@ -791,10 +817,10 @@ export function ConfigurationPage({
                   <article className="backend-card" key={alias}>
                     <h3>{alias} <button type="button" className="danger compact-remove" onClick={() => removeDraftModel(alias)}>删除</button></h3>
                     <Field label="上游模型" htmlFor={`model-${alias}`}>
-                      <select id={`model-${alias}`} value={editable.llms[alias].model} onChange={(event) => mutate((snapshot) => { snapshot.llms[alias].model = event.target.value; })}>
-                        {summary.model_catalog?.map((model) => <option key={model} value={model}>{model}</option>)}
-                        {editable.llms[alias].model && !summary.model_catalog?.includes(editable.llms[alias].model) && <option value={editable.llms[alias].model}>{editable.llms[alias].model}（未在模型清单）</option>}
-                      </select>
+                      <Select value={editable.llms[alias].model} onValueChange={(value) => mutate((snapshot) => { snapshot.llms[alias].model = value; })}>
+                        <SelectTrigger id={`model-${alias}`}><SelectValue placeholder="选择上游模型" /></SelectTrigger>
+                        <SelectContent>{summary.model_catalog?.map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}</SelectContent>
+                      </Select>
                     </Field>
                     <Field label="模型说明" htmlFor={`description-${alias}`}>
                       <textarea id={`description-${alias}`} rows={3} value={editable.llms[alias].description} onChange={(event) => mutate((snapshot) => { snapshot.llms[alias].description = event.target.value; })} />
@@ -809,7 +835,7 @@ export function ConfigurationPage({
                   </article>
                 ))}
               </div>
-              <div className="actions model-add-row"><select aria-label="选择要添加的模型" value={newModelId} onChange={(event) => setNewModelId(event.target.value)}><option value="">选择可用模型</option>{summary.model_catalog?.map((model) => <option key={model} value={model}>{model}</option>)}</select><button type="button" className="secondary" onClick={addDraftModel} disabled={!newModelId}>添加模型</button></div>
+              <div className="actions model-add-row"><Select value={newModelId || "none"} onValueChange={(value) => setNewModelId(value === "none" ? "" : value)}><SelectTrigger aria-label="选择要添加的模型"><SelectValue placeholder="选择可用模型" /></SelectTrigger><SelectContent><SelectItem value="none">选择可用模型</SelectItem>{summary.model_catalog?.map((model) => <SelectItem key={model} value={model}>{model}</SelectItem>)}</SelectContent></Select><button type="button" className="secondary" onClick={addDraftModel} disabled={!newModelId}>添加模型</button></div>
             </fieldset>
 
             <Field label="发布说明" htmlFor="release-notes">
@@ -844,8 +870,7 @@ export function ConfigurationPage({
               <pre className="yaml-view" aria-label="托管配置 YAML">{toYaml(editable)}</pre>
             </section>
           </div>
-          </div>
-        </div>
+        </DialogContent></Dialog>
       )}
 
       {view === "activity" && <div className="configuration-columns">
@@ -874,8 +899,8 @@ export function ConfigurationPage({
             <div className="audit-list">
               {audit.items.map((item) => <article key={item.audit_id}>
                 <div><strong>{translateAuditAction(item.action)}</strong><span className={`status ${item.outcome}`}>{translateStatus(item.outcome)}</span></div>
-                <small>{new Date(item.occurred_at).toLocaleString()} · {item.subject_type === "system" ? "系统" : item.subject_type || "系统"}</small>
-                <code>{JSON.stringify(item.summary)}</code>
+                <small>{new Date(item.occurred_at).toLocaleString("zh-CN")} · {translateSubjectType(item.subject_type)}</small>
+                <span className="audit-summary">{formatAuditSummary(item.summary)}</span>
               </article>)}
             </div>
           )}
@@ -884,14 +909,14 @@ export function ConfigurationPage({
       </div>}
 
       {view === "route-lab" && <section className="panel route-chat-panel">
-        <div className="panel-title"><div><h2>路由测试</h2><span>仅用于管理员测试，不会保存输入</span></div><div className="actions"><label className="field route-version-field"><span>已启用智能路由</span><select id="route-lab-route" value={labRouteId} onChange={(event) => setLabRouteId(event.target.value)}><option value="">当前运行配置</option>{summary.active_smart_routes.map((item) => <option key={item.draft_id} value={item.draft_id}>{item.name || "未命名智能路由"}</option>)}</select></label><button type="button" className="secondary" onClick={clearLab} disabled={!labMessages.length}>清除窗口</button></div></div>
+        <div className="panel-title route-lab-header"><h2>路由测试</h2><div className="route-lab-controls"><div className="route-lab-select"><span>已启用智能路由</span><Select value={labRouteId || "current"} onValueChange={(value) => setLabRouteId(value === "current" ? "" : value)}><SelectTrigger id="route-lab-route"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="current">当前运行配置</SelectItem>{summary.active_smart_routes.map((item) => <SelectItem key={item.draft_id} value={item.draft_id}>{item.name || "未命名智能路由"}</SelectItem>)}</SelectContent></Select></div></div></div>
         <div className="chat-thread" aria-live="polite">
           {!labMessages.length && <div className="chat-empty"><strong>开始测试智能路由</strong><span>输入一段任务文本，查看系统选择的模型和判断耗时。</span></div>}
-          {labMessages.map((message, index) => <div key={`${message.role}-${index}`} className={`chat-message ${message.role}`}><div className="chat-bubble">{message.text}</div><small>{new Date(message.createdAt).toLocaleTimeString()}{message.meta ? ` · ${message.meta}` : ""}</small></div>)}
+          {labMessages.map((message, index) => <div key={`${message.role}-${index}`} className={`chat-message ${message.role}`}><div className="chat-bubble">{message.text}</div><small>{new Date(message.createdAt).toLocaleTimeString("zh-CN")}{message.meta ? ` · ${message.meta}` : ""}</small></div>)}
         </div>
         <form className="chat-composer" onSubmit={(event) => { event.preventDefault(); void runLab(); }}>
-          <textarea id="route-lab-text" rows={3} value={labText} onChange={(event) => setLabText(event.target.value)} placeholder="输入要测试的任务，例如：帮我总结这份报告" />
-          <button type="submit" disabled={actionBusy || !labText.trim()}>发送测试</button>
+          <textarea id="route-lab-text" rows={3} value={labText} onChange={(event) => setLabText(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder="输入要测试的任务，例如：帮我总结这份报告" />
+          <div className="chat-actions"><button type="button" className="secondary" onClick={clearLab} disabled={!labMessages.length}>清除窗口</button><button type="submit" disabled={actionBusy || !labText.trim()}>发送</button></div>
         </form>
       </section>}
     </div>
@@ -924,14 +949,6 @@ function NumberField({
   step?: string;
 }) {
   return <Field label={label} htmlFor={id}><input id={id} type="number" step={step} value={value} onChange={(event) => onChange(event.currentTarget.valueAsNumber)} /></Field>;
-}
-
-function Toast({ message, tone = "success", onClose }: { message: string; tone?: "success" | "error"; onClose: () => void }) {
-  useEffect(() => {
-    const timer = window.setTimeout(onClose, 4200);
-    return () => window.clearTimeout(timer);
-  }, [message, onClose]);
-  return <div className={`toast ${tone}`} role={tone === "error" ? "alert" : "status"}><span>{message}</span><button className="toast-close" type="button" aria-label="关闭通知" onClick={onClose}>×</button></div>;
 }
 
 function Metric({ label, value, hint }: { label: string; value: string; hint?: string }) {

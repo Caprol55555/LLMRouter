@@ -3,6 +3,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ConfigurationPage } from "./configuration";
 
+if (!HTMLElement.prototype.scrollIntoView) {
+  HTMLElement.prototype.scrollIntoView = vi.fn();
+}
+
 const snapshot = {
   router: {
     judge_model: "judge-upstream",
@@ -180,7 +184,8 @@ describe("Configuration page", () => {
     render(<ConfigurationPage csrf="csrf-value" onUnauthorized={vi.fn()} />);
     fireEvent.click(await screen.findByRole("button", { name: "新建智能路由版本" }));
     const defaultModel = await screen.findByLabelText("默认模型");
-    fireEvent.change(defaultModel, { target: { value: "qwen" } });
+    fireEvent.click(defaultModel);
+    fireEvent.click(await screen.findByRole("option", { name: "qwen" }));
     fireEvent.change(screen.getByLabelText("发布说明"), { target: { value: "Prefer qwen" } });
     fireEvent.click(screen.getByRole("button", { name: "校验版本" }));
 

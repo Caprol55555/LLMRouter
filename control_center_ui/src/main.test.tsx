@@ -103,7 +103,7 @@ describe("Control Center dashboard states", () => {
     );
     render(<App />);
     expect(await screen.findByText("此时间范围内没有路由请求。")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "活动记录" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "活动记录" })).toBeTruthy();
   });
 
   it("renders a sanitized API error state", async () => {
