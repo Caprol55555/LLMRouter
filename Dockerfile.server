@@ -1,0 +1,42 @@
+# syntax=docker/dockerfile:1.7
+
+FROM node:24-alpine AS dashboard-builder
+
+WORKDIR /ui
+COPY control_center_ui/package.json control_center_ui/package-lock.json ./
+RUN npm ci --ignore-scripts
+COPY control_center_ui/index.html control_center_ui/tsconfig.json control_center_ui/vite.config.ts ./
+COPY control_center_ui/src ./src
+RUN npm run build
+
+FROM python:3.11-slim AS runtime
+
+ARG LLMROUTER_COMMIT_SHA=unknown
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    LLMROUTER_COMMIT_SHA=${LLMROUTER_COMMIT_SHA}
+
+WORKDIR /app
+
+RUN addgroup --system --gid 10001 llmrouter \
+    && adduser --system --uid 10001 --ingroup llmrouter --home /app llmrouter \
+    && mkdir -p /data && chown -R llmrouter:llmrouter /data
+
+COPY requirements-server.txt ./
+RUN pip install --no-cache-dir -r requirements-server.txt
+
+COPY pyproject.toml README.md LICENSE ./
+COPY openclaw_router ./openclaw_router
+COPY --from=dashboard-builder /ui/dist ./openclaw_router/control_center/static
+RUN pip install --no-cache-dir --no-deps . \
+    && chown -R llmrouter:llmrouter /app
+
+USER llmrouter
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
+
+CMD ["python", "-m", "openclaw_router", "--config", "/config/config.yaml", "--host", "0.0.0.0", "--port", "8000", "--no-prefix"]

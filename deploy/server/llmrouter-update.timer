@@ -1,0 +1,12 @@
+[Unit]
+Description=Poll GitHub Container Registry for tested LLMRouter main releases
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+RandomizedDelaySec=45s
+Persistent=true
+Unit=llmrouter-update.service
+
+[Install]
+WantedBy=timers.target

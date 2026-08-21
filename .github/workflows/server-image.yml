@@ -1,0 +1,192 @@
+name: Test and publish router server
+
+concurrency:
+  group: server-image-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches:
+      - main
+      - 'codex/**'
+    paths:
+      - 'openclaw_router/**'
+      - 'tests/test_openclaw_http_tool_calls.py'
+      - 'tests/test_openclaw_session_routing.py'
+      - 'tests/test_openclaw_websocket_smoke.py'
+      - 'tests/control_center/**'
+      - 'control_center_ui/**'
+      - 'requirements-server.txt'
+      - 'Dockerfile.server'
+      - '.dockerignore'
+      - 'pyproject.toml'
+      - 'deploy/server/**'
+      - '.github/workflows/server-image.yml'
+  pull_request:
+    paths:
+      - 'openclaw_router/**'
+      - 'tests/test_openclaw_http_tool_calls.py'
+      - 'tests/test_openclaw_session_routing.py'
+      - 'tests/test_openclaw_websocket_smoke.py'
+      - 'tests/control_center/**'
+      - 'control_center_ui/**'
+      - 'requirements-server.txt'
+      - 'Dockerfile.server'
+      - '.dockerignore'
+      - 'pyproject.toml'
+      - 'deploy/server/**'
+      - '.github/workflows/server-image.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements-server.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: control_center_ui/package-lock.json
+      - name: Build Control Center dashboard
+        working-directory: control_center_ui
+        run: npm ci --ignore-scripts && npm test && npm run build
+      - name: Install server test dependencies
+        run: |
+          pip install -r requirements-server.txt pytest
+          pip install --no-deps .
+      - name: Compile server package
+        run: python -m compileall -q openclaw_router
+      - name: Run server tests
+        run: >-
+          pytest -q
+          tests/test_openclaw_http_tool_calls.py
+          tests/test_openclaw_session_routing.py
+          tests/test_openclaw_websocket_smoke.py
+          tests/control_center
+
+      - name: Validate production deployment assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n deploy/server/update-llmrouter
+          bash -n deploy/server/auto-update-llmrouter
+          printf '%s\n' 'LLMROUTER_IMAGE=ghcr.io/caprol55555/llmrouter:main' > /tmp/llmrouter-ci.env
+          printf '%s\n' 'LLMROUTER_INBOUND_API_KEY=ci-inbound-key' >> /tmp/llmrouter-ci.env
+          printf '%s\n' 'NINE_ROUTER_INTERNAL_API_KEY=ci-upstream-key' >> /tmp/llmrouter-ci.env
+          printf '%s\n' 'LLMROUTER_ADMIN_TOKEN=ci-admin-token' >> /tmp/llmrouter-ci.env
+          cp /tmp/llmrouter-ci.env deploy/server/.env
+          trap 'rm -f deploy/server/.env' EXIT
+          docker compose --env-file deploy/server/.env \
+            -f deploy/server/docker-compose.yml config --quiet
+
+  image:
+    if: github.event_name == 'push'
+    needs:
+      - test
+      - container-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate image metadata
+        id: metadata
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/caprol55555/llmrouter
+          tags: |
+            type=sha,prefix=sha-,format=long
+            type=raw,value=main,enable={{is_default_branch}}
+      - name: Build and publish linux/amd64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.server
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            LLMROUTER_COMMIT_SHA=${{ github.sha }}
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  container-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build local runtime image
+        run: docker build --file Dockerfile.server --tag llmrouter:ci .
+      - name: Run read-only root filesystem smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          config_dir="$RUNNER_TEMP/llmrouter-config"
+          data_dir="$RUNNER_TEMP/llmrouter-data"
+          mkdir -p "$config_dir" "$data_dir"
+          sudo chown 10001:10001 "$data_dir"
+          cat > "$config_dir/config.yaml" <<'YAML'
+          serve:
+            host: 0.0.0.0
+            port: 8000
+          router:
+            strategy: random
+          llms:
+            local:
+              provider: local
+              model: local-model
+              base_url: http://127.0.0.1:9/v1
+              auth_mode: none
+          control_center:
+            enabled: true
+            data_dir: /data
+          YAML
+          container_name="llmrouter-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup() { docker rm -f "$container_name" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          container_id="$(docker run --name "$container_name" -d --read-only --tmpfs /tmp --tmpfs /run \
+            --mount "type=bind,src=$config_dir,dst=/config,readonly" \
+            --mount "type=bind,src=$data_dir,dst=/data" \
+            --env LLMROUTER_ADMIN_TOKEN=ci-admin-token \
+            --publish 18000:8000 llmrouter:ci)"
+          healthy=0
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18000/health >/tmp/health.json; then
+              healthy=1
+              break
+            fi
+            sleep 1
+          done
+          if [[ "$healthy" != "1" ]]; then
+            docker inspect "$container_id"
+            docker logs "$container_id"
+            exit 1
+          fi
+          test -s /tmp/health.json
+          grep -q '"status":"ok"' /tmp/health.json
+          if [[ ! -s "$data_dir/control-center.db" ]]; then
+            ls -la "$data_dir"
+            docker logs "$container_id"
+            exit 1
+          fi
+      - name: Verify runtime dependency boundary
+        run: |
+          docker run --rm --entrypoint python llmrouter:ci -c \
+            "import importlib.util; forbidden = ['torch', 'transformers', 'gradio']; assert not [name for name in forbidden if importlib.util.find_spec(name)], forbidden"

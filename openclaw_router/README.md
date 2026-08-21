@@ -359,6 +359,50 @@ OpenAI-compatible adapter fields (supported in both `router` and each `llms.<nam
 - `chat_path`: defaults to `/chat/completions`.
 - `local`: optional boolean override for local detection in `auto` mode.
 
+### Session-aware production routing
+
+`router.strategy: llm` normally asks the judge on every `auto` request. The
+optional session cache keeps agent tool loops on the selected backend and
+rejudges after a bounded number of new user turns:
+
+```yaml
+security:
+  inbound_api_key: ${LLMROUTER_INBOUND_API_KEY}
+  require_inbound_auth: true
+  forbidden_upstream_models: [auto]
+  forbidden_upstream_prefixes: ["lr/"]
+
+router:
+  strategy: llm
+  default_model: glm
+  judge_timeout_seconds: 15
+  routing_context_chars: 2000
+
+session_routing:
+  enabled: true
+  ttl_seconds: 1800
+  rejudge_every_user_turns: 5
+  allowed_rejudge_intervals: [1, 3, 5, 10]
+  max_entries: 10000
+  rejudge_on_backend_error: true
+```
+
+- `auto` uses `rejudge_every_user_turns`.
+- `auto:once` judges once until the session TTL expires.
+- `auto:1`, `auto:3`, `auto:5`, and `auto:10` override the interval when the
+  number is allowed by `allowed_rejudge_intervals`.
+- Tool messages do not increment the user-turn counter.
+- Session identity uses `x-llmrouter-session-id`, then the OpenAI `user` field,
+  then a hash of the stable opening context. Raw prompts are not stored in the
+  cache or route logs.
+- A backend error invalidates the cached decision so the next request is judged
+  again.
+
+The production-only dependency list and image are `requirements-server.txt`
+and `Dockerfile.server`. They intentionally exclude Torch, Transformers,
+Gradio, ComfyUI, and all training dependencies. See
+`config.production.example.yaml` for a complete 9router-backed example.
+
 Example: local multi-framework pool
 
 ```yaml

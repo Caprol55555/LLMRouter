@@ -147,6 +147,7 @@ class OpenClawHttpToolCallTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         body = response.json()
+        self.assertIs(RecordingAsyncClient.last_post_json["stream"], False)
         self.assertEqual(RecordingAsyncClient.last_post_json["tools"], payload["tools"])
         self.assertEqual(RecordingAsyncClient.last_post_json["tool_choice"], "auto")
         self.assertEqual(body["choices"][0]["message"]["tool_calls"][0]["function"]["name"], "write_file")
