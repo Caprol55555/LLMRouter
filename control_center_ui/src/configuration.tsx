@@ -55,8 +55,8 @@ type Draft = {
 type DraftSummary = Omit<Draft, "snapshot">;
 type ConfigurationSummary = {
   active: Version & { snapshot: ManagedSnapshot };
-  drafts: DraftSummary[];
-  active_drafts?: DraftSummary[];
+  smart_routes: DraftSummary[];
+  active_smart_routes: DraftSummary[];
   model_catalog?: string[];
   read_only: {
     serve: { host: string; port: number };
@@ -95,6 +95,8 @@ type AuditPage = {
     subject_id: string | null;
     summary: Record<string, unknown>;
   }>;
+  page: number;
+  page_size: number;
   total: number;
 };
 type LabResult = {
@@ -117,6 +119,54 @@ type DiscoveryResult = {
 type DraftDiff = {
   changes: Array<{ path: string; before: unknown; after: unknown }>;
 };
+
+function translateStatus(value: string | null | undefined): string {
+  const labels: Record<string, string> = {
+    editing: "编辑中",
+    ready: "已校验",
+    finalized: "已生成版本",
+    active: "已启用",
+    pending: "待发布",
+    success: "成功",
+    failure: "失败",
+    denied: "已拒绝",
+  };
+  return value && labels[value] ? labels[value] : value || "未知";
+}
+
+function translateSource(value: string): string {
+  return value === "yaml_baseline" ? "配置文件基线" : value === "draft" ? "智能路由版本" : value;
+}
+
+function translateAuditAction(value: string): string {
+  const labels: Record<string, string> = {
+    baseline_imported: "导入配置基线",
+    draft_created: "创建智能路由版本",
+    draft_updated: "更新智能路由版本",
+    draft_validated: "校验智能路由版本",
+    draft_finalized: "生成配置版本",
+    draft_deleted: "删除智能路由版本",
+    draft_activation_changed: "修改智能路由启用状态",
+    model_discovery: "发现可用模型",
+    route_lab_evaluate: "执行路由测试",
+    password_change: "修改密码",
+    login: "登录",
+    logout: "退出登录",
+    integrity_check: "检查数据完整性",
+  };
+  return labels[value] || value;
+}
+
+function translateValidationMessage(value: string): string {
+  const replacements: Array<[string, string]> = [
+    ["Router-internal model IDs cannot be used as upstream candidates", "不能将路由器内部模型 ID 用作上游候选模型"],
+    ["At least one configured backend must be allowed", "至少需要启用一个已配置模型"],
+    ["The default model must be in allowed_models", "默认模型必须包含在可用模型中"],
+    ["The upstream model is blocked by the server recursion guard", "该上游模型被服务器递归保护规则阻止"],
+    ["max_tokens cannot exceed context_limit", "最大令牌数不能超过上下文上限"],
+  ];
+  return replacements.reduce((result, [from, to]) => result.replace(from, to), value);
+}
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -172,6 +222,8 @@ export function ConfigurationPage({
   const [summary, setSummary] = useState<ConfigurationSummary | null>(null);
   const [versions, setVersions] = useState<VersionPage | null>(null);
   const [audit, setAudit] = useState<AuditPage | null>(null);
+  const [versionPage, setVersionPage] = useState(1);
+  const [auditPage, setAuditPage] = useState(1);
   const [selectedId, setSelectedId] = useState("");
   const [draft, setDraft] = useState<Draft | null>(null);
   const [draftName, setDraftName] = useState("");
@@ -191,6 +243,7 @@ export function ConfigurationPage({
   const [modelSearch, setModelSearch] = useState("");
   const [selectedDiscoveredModels, setSelectedDiscoveredModels] = useState<string[]>([]);
   const [newAlias, setNewAlias] = useState("");
+  const [labMessages, setLabMessages] = useState<Array<{ role: "user" | "assistant"; text: string; meta?: string }>>([]);
 
   function handleError(reason: unknown) {
     const apiError = reason as ApiError;
@@ -204,17 +257,18 @@ export function ConfigurationPage({
     try {
       const [nextSummary, nextVersions, nextAudit] = await Promise.all([
         api<ConfigurationSummary>("/admin/api/configuration"),
-        api<VersionPage>("/admin/api/configuration/versions?page=1&page_size=25"),
-        api<AuditPage>("/admin/api/audit?page=1&page_size=20"),
+        api<VersionPage>(`/admin/api/configuration/versions?page=${versionPage}&page_size=10`),
+        api<AuditPage>(`/admin/api/audit?page=${auditPage}&page_size=10`),
       ]);
       setSummary(nextSummary);
       setVersions(nextVersions);
       setAudit(nextAudit);
       setSelectedDiscoveredModels(nextSummary.model_catalog || []);
+      const routes = nextSummary.smart_routes;
       const candidate = preferredDraftId || selectedId;
-      const nextSelected = nextSummary.drafts.some((item) => item.draft_id === candidate)
+      const nextSelected = routes.some((item) => item.draft_id === candidate)
         ? candidate
-        : nextSummary.drafts[0]?.draft_id || "";
+        : routes[0]?.draft_id || "";
       setSelectedId(nextSelected);
       if (!nextSelected) {
         setDraft(null);
@@ -234,9 +288,9 @@ export function ConfigurationPage({
     setError("");
     try {
       const [nextDraft, nextDiff] = await Promise.all([
-        api<Draft>(`/admin/api/configuration/drafts/${encodeURIComponent(draftId)}`),
+        api<Draft>(`/admin/api/configuration/routes/${encodeURIComponent(draftId)}`),
         api<DraftDiff>(
-          `/admin/api/configuration/drafts/${encodeURIComponent(draftId)}/diff`,
+          `/admin/api/configuration/routes/${encodeURIComponent(draftId)}/diff`,
         ),
       ]);
       setDraft(nextDraft);
@@ -251,9 +305,7 @@ export function ConfigurationPage({
     }
   }
 
-  useEffect(() => {
-    void loadPage();
-  }, []);
+  useEffect(() => { void loadPage(); }, [versionPage, auditPage]);
 
   useEffect(() => {
     if (selectedId) void loadDraft(selectedId);
@@ -291,7 +343,7 @@ export function ConfigurationPage({
   async function saveDraft(): Promise<Draft | null> {
     if (!draft || !editable || draft.status === "finalized") return draft;
     const nextDraft = await api<Draft>(
-      `/admin/api/configuration/drafts/${encodeURIComponent(draft.draft_id)}`,
+      `/admin/api/configuration/routes/${encodeURIComponent(draft.draft_id)}`,
       {
         method: "PUT",
         headers: writeHeaders(),
@@ -309,7 +361,7 @@ export function ConfigurationPage({
     setReleaseNotes(nextDraft.release_notes);
     setDiff(
       await api<DraftDiff>(
-        `/admin/api/configuration/drafts/${encodeURIComponent(nextDraft.draft_id)}/diff`,
+        `/admin/api/configuration/routes/${encodeURIComponent(nextDraft.draft_id)}/diff`,
       ),
     );
     return nextDraft;
@@ -330,12 +382,12 @@ export function ConfigurationPage({
 
   async function createDraft() {
     await perform(async () => {
-      const created = await api<Draft>("/admin/api/configuration/drafts", {
+      const created = await api<Draft>("/admin/api/configuration/routes", {
         method: "POST",
         headers: writeHeaders(),
         body: JSON.stringify({ release_notes: "", name: "未命名草稿" }),
       });
-      setNotice("已从当前配置创建草稿。");
+      setNotice("已从当前配置创建智能路由版本。");
       await loadPage(created.draft_id);
     });
   }
@@ -345,7 +397,7 @@ export function ConfigurationPage({
       const current = dirty ? await saveDraft() : draft;
       if (!current) return;
       const validated = await api<Draft>(
-        `/admin/api/configuration/drafts/${encodeURIComponent(current.draft_id)}/validate`,
+        `/admin/api/configuration/routes/${encodeURIComponent(current.draft_id)}/validate`,
         {
           method: "POST",
           headers: writeHeaders(),
@@ -358,7 +410,7 @@ export function ConfigurationPage({
       setReleaseNotes(validated.release_notes);
       setNotice(
         validated.status === "ready"
-          ? "校验通过，草稿可以生成待发布版本。"
+          ? "校验通过，智能路由版本可以生成配置版本。"
           : "校验完成，但仍存在问题。",
       );
       await loadPage(validated.draft_id);
@@ -369,7 +421,7 @@ export function ConfigurationPage({
     if (!draft) return;
     await perform(async () => {
       const version = await api<Version>(
-        `/admin/api/configuration/drafts/${encodeURIComponent(draft.draft_id)}/finalize`,
+        `/admin/api/configuration/routes/${encodeURIComponent(draft.draft_id)}/finalize`,
         {
           method: "POST",
           headers: writeHeaders(),
@@ -395,13 +447,13 @@ export function ConfigurationPage({
           body: JSON.stringify({ expected_active_version_id: summary.active.version_id }),
         },
       );
-      setNotice(`Activated v${result.version_number}; cleared ${result.cache_cleared} cached routes.`);
+      setNotice(`已启用 v${result.version_number}，清理缓存路由 ${result.cache_cleared} 条。`);
       await loadPage();
     });
   }
 
   async function rollbackVersion(version: Version) {
-    if (!summary || version.is_active || !window.confirm(`Rollback to v${version.version_number}?`)) return;
+    if (!summary || version.is_active || !window.confirm(`确认回滚到 v${version.version_number}？`)) return;
     await perform(async () => {
       const result = await api<Version & { cache_cleared: number }>(
         `/admin/api/configuration/versions/${version.version_id}/rollback`,
@@ -410,11 +462,11 @@ export function ConfigurationPage({
           headers: writeHeaders(),
           body: JSON.stringify({
             expected_active_version_id: summary.active.version_id,
-            release_notes: `Rollback to version ${version.version_number}`,
+            release_notes: `回滚到版本 ${version.version_number}`,
           }),
         },
       );
-      setNotice(`Rollback created and activated v${result.version_number}.`);
+      setNotice(`已创建回滚版本并启用 v${result.version_number}。`);
       await loadPage();
     });
   }
@@ -457,30 +509,39 @@ export function ConfigurationPage({
   }
 
   async function runLab() {
-    if (!labText.trim()) return;
+    const text = labText.trim();
+    if (!text) return;
+    setLabMessages((current) => [...current, { role: "user", text }]);
     await perform(async () => {
-      const body: Record<string, unknown> = { text: labText };
+      const body: Record<string, unknown> = { text };
       if (labVersionId) body.version_id = Number(labVersionId);
-      if (draft?.status !== "finalized" && draft?.draft_id) body.draft_id = draft.draft_id;
-      setLabResult(await api<LabResult>("/admin/api/route-lab/evaluate", {
+      if (draft?.status !== "finalized" && draft?.draft_id) body.route_id = draft.draft_id;
+      const result = await api<LabResult>("/admin/api/route-lab/evaluate", {
         method: "POST",
         headers: writeHeaders(),
         body: JSON.stringify(body),
-      }));
+      });
+      setLabText("");
+      setLabResult(result);
+      setLabMessages((current) => [...current, {
+        role: "assistant",
+        text: `已选择模型：${result.result.selected_model}`,
+        meta: `${result.result.judge_status === "used" ? "已使用判断模型" : "未使用判断模型"} · ${result.result.judge_latency_ms == null ? "—" : `${result.result.judge_latency_ms.toFixed(1)} 毫秒`} · 不会持久化`,
+      }]);
     });
   }
 
   async function deleteDraft() {
-    if (!draft || !window.confirm("Delete this editable draft?")) return;
+    if (!draft || !window.confirm("确认删除此智能路由版本？")) return;
     await perform(async () => {
       await api<{ status: string }>(
-        `/admin/api/configuration/drafts/${encodeURIComponent(draft.draft_id)}?revision=${draft.revision}`,
+        `/admin/api/configuration/routes/${encodeURIComponent(draft.draft_id)}?revision=${draft.revision}`,
         { method: "DELETE", headers: writeHeaders() },
       );
       setSelectedId("");
       setDraft(null);
       setEditable(null);
-      setNotice("Draft deleted.");
+      setNotice("智能路由版本已删除。");
       await loadPage();
     });
   }
@@ -501,80 +562,93 @@ export function ConfigurationPage({
 
   return (
     <div className="configuration-page">
-      {error && <div className="error" role="alert">{error}</div>}
-      {notice && <div className="notice" role="status">{notice}</div>}
+      {error && <Toast message={error} tone="error" onClose={() => setError("")} />}
+      {notice && <Toast message={notice} onClose={() => setNotice("")} />}
 
       {view === "configuration" && <section className="cards configuration-summary" aria-label="配置摘要">
-        <Metric label="当前版本" value={`v${active.version_number}`} hint={active.source} />
+        <Metric label="当前版本" value={`v${active.version_number}`} hint={translateSource(active.source)} />
         <Metric label="运行状态" value="已启用" hint="支持原子启用" />
-        <Metric label="草稿数量" value={String(summary.drafts.length)} hint="最多显示 100 条" />
+        <Metric label="智能路由数量" value={String(summary.smart_routes.length)} hint="最多显示 100 条" />
         <Metric label="待发布版本" value={String(versions?.items.filter((item) => item.publish_state === "pending").length || 0)} />
       </section>}
 
       {view === "configuration" && <section className="panel">
         <div className="panel-title configuration-title">
           <div>
-            <h2>配置草稿</h2>
-          <span>草稿需先校验，再进行原子启用；回滚会生成新的不可变版本。</span>
+            <h2>智能路由版本管理</h2>
+          <span>每个智能路由都可以独立命名、编辑和启用；版本生成后可在活动记录中启用或回滚。</span>
           </div>
-          <button onClick={() => void createDraft()} disabled={actionBusy}>新建草稿</button>
+          <button onClick={() => void createDraft()} disabled={actionBusy}>新建智能路由版本</button>
         </div>
         <label className="field compact-field" htmlFor="draft-selector">
-          <span>当前草稿</span>
+          <span>当前智能路由版本</span>
           <select
             id="draft-selector"
             value={selectedId}
             onChange={(event) => setSelectedId(event.target.value)}
           >
-            <option value="">未选择草稿</option>
-            {summary.drafts.map((item) => (
+            <option value="">未选择版本</option>
+            {summary.smart_routes.map((item) => (
               <option key={item.draft_id} value={item.draft_id}>
-                {item.name || "未命名草稿"} · {item.status} · 修订 {item.revision}{item.is_active ? " · 已启用" : ""}
+                {item.name || "未命名智能路由"} · {translateStatus(item.status)} · 修订 {item.revision}{item.is_active ? " · 已启用" : ""}
               </option>
             ))}
           </select>
         </label>
-        {!summary.drafts.length && <div className="state">暂无草稿，请从当前版本新建。</div>}
+        {!summary.smart_routes.length && <div className="state">暂无智能路由版本，请新建一个版本。</div>}
+        {!!summary.active_smart_routes.length && <div className="active-route-list"><strong>已启用智能路由</strong><div>{summary.active_smart_routes.map((item) => <span className="route-tag" key={item.draft_id}>{item.name || "未命名智能路由"}</span>)}</div></div>}
       </section>}
 
       {view === "configuration" && <section className="panel">
-        <div className="panel-title"><h2>模型清单</h2><span>发现后勾选可用于草稿的模型</span></div>
+        <div className="panel-title"><h2>模型清单</h2><span>选择可用于智能路由的上游模型</span></div>
         <button className="secondary" onClick={() => { setModelMenuOpen(true); void runDiscovery(); }} disabled={actionBusy}>发现可用模型</button>
-        {modelMenuOpen && <div className="model-menu"><input placeholder="模糊搜索模型" value={modelSearch} onChange={(event) => setModelSearch(event.target.value)} />{(discovery?.models || summary.model_catalog || []).filter((model) => model.toLowerCase().includes(modelSearch.toLowerCase())).map((model) => <label key={model}><input type="checkbox" checked={selectedDiscoveredModels.includes(model)} onChange={(event) => setSelectedDiscoveredModels((current) => event.target.checked ? [...new Set([...current, model])] : current.filter((item) => item !== model))} />{model}</label>)}<div className="actions"><button onClick={() => void saveModelCatalog()}>确认</button><button className="secondary" onClick={() => setModelMenuOpen(false)}>取消</button></div></div>}
+        {modelMenuOpen && <div className="model-menu">
+          <div className="model-menu-toolbar">
+            <div className="selected-models" aria-label="已勾选模型">
+              <span>已勾选模型</span>
+              {selectedDiscoveredModels.length ? selectedDiscoveredModels.map((model) => <button key={model} type="button" className="model-chip" onClick={() => setSelectedDiscoveredModels((current) => current.filter((item) => item !== model))}>{model} ×</button>) : <small>暂无</small>}
+            </div>
+            <input placeholder="模糊搜索模型" aria-label="模糊搜索模型" value={modelSearch} onChange={(event) => setModelSearch(event.target.value)} />
+          </div>
+          <div className="model-results">
+            {(discovery?.models || summary.model_catalog || []).filter((model) => model.toLowerCase().includes(modelSearch.toLowerCase())).map((model) => <button key={model} type="button" className={`model-option ${selectedDiscoveredModels.includes(model) ? "selected" : ""}`} onClick={() => setSelectedDiscoveredModels((current) => current.includes(model) ? current.filter((item) => item !== model) : [...current, model])}>{selectedDiscoveredModels.includes(model) ? "已选择 · " : ""}{model}</button>)}
+          </div>
+          <div className="actions model-menu-actions"><button onClick={() => void saveModelCatalog()}>确认</button><button className="secondary" onClick={() => { setSelectedDiscoveredModels(summary.model_catalog || []); setModelSearch(""); setModelMenuOpen(false); }}>取消</button></div>
+        </div>}
       </section>}
 
-      {draftLoading && <div className="state">正在加载草稿…</div>}
+      {draftLoading && <div className="state">正在加载智能路由版本…</div>}
       {view === "configuration" && draft && editable && !draftLoading && (
         <>
           <section className="panel">
             <div className="panel-title configuration-title">
               <div>
-                <h2>草稿编辑器</h2>
+                <h2>智能路由版本编辑器</h2>
                 <span>
-                  {draft.status} · 修订 {draft.revision}
+                  {translateStatus(draft.status)} · 修订 {draft.revision}
                   {dirty ? " · 未保存" : " · 已保存"}
                 </span>
               </div>
-              <label className="field compact-field"><span>草稿名称</span><input value={draftName} onChange={(event) => setDraftName(event.target.value)} /></label>
+              <label className="field compact-field"><span>智能路由名称</span><input value={draftName} onChange={(event) => setDraftName(event.target.value)} /></label>
               <div className="actions">
-                <button className="secondary" disabled={actionBusy} onClick={() => void perform(async () => { const updated = await api<Draft>(`/admin/api/configuration/drafts/${encodeURIComponent(draft.draft_id)}/activation`, { method: "POST", headers: writeHeaders(), body: JSON.stringify({ active: !draft.is_active }) }); setDraft(updated); await loadPage(draft.draft_id); })}>{draft.is_active ? "停用" : "启用"}</button>
+                <button className="secondary" disabled={actionBusy} onClick={() => void perform(async () => { const updated = await api<Draft>(`/admin/api/configuration/routes/${encodeURIComponent(draft.draft_id)}/activation`, { method: "POST", headers: writeHeaders(), body: JSON.stringify({ active: !draft.is_active }) }); setDraft(updated); await loadPage(draft.draft_id); })}>{draft.is_active ? "停用" : "启用"}</button>
                 <button
                   className="secondary"
                   onClick={() => void perform(async () => {
                     await saveDraft();
-                    setNotice("草稿已保存，请先校验再发布。");
+                    setNotice("智能路由版本已保存，请先校验再生成版本。");
                     await loadPage(draft.draft_id);
                   })}
                   disabled={actionBusy || !editableDraft || !dirty}
                 >
-                  保存草稿
+                  保存版本
                 </button>
                 <button
                   className="secondary"
                   onClick={() => void validateDraft()}
                   disabled={actionBusy || !editableDraft}
                 >
-                  校验
+                  校验版本
                 </button>
                 <button
                   onClick={() => void finalizeDraft()}
@@ -586,14 +660,14 @@ export function ConfigurationPage({
                     !releaseNotes.trim()
                   }
                 >
-                  生成待发布版本
+                  生成配置版本
                 </button>
                 <button
                   className="danger"
                   onClick={() => void deleteDraft()}
                   disabled={actionBusy || !editableDraft}
                 >
-                  删除草稿
+                  删除版本
                 </button>
               </div>
             </div>
@@ -604,7 +678,7 @@ export function ConfigurationPage({
                 <ul>
                   {draft.validation_issues.map((issue) => (
                     <li key={`${issue.path}:${issue.code}`}>
-                      <code>{issue.path}</code> — {issue.message}
+                      <code>{issue.path}</code> — {translateValidationMessage(issue.message)}
                     </li>
                   ))}
                 </ul>
@@ -631,9 +705,9 @@ export function ConfigurationPage({
                     {aliases.map((alias) => <option key={alias} value={alias}>{alias}</option>)}
                   </select>
                 </Field>
-                <NumberField label="Judge timeout seconds" id="judge-timeout" value={editable.router.judge_timeout_seconds} onChange={(value) => mutate((snapshot) => { snapshot.router.judge_timeout_seconds = value; })} step="0.1" />
-                <NumberField label="Judge token budget" id="judge-tokens" value={editable.router.judge_max_tokens} onChange={(value) => mutate((snapshot) => { snapshot.router.judge_max_tokens = value; })} />
-                <NumberField label="Routing context characters" id="routing-context" value={editable.router.routing_context_chars} onChange={(value) => mutate((snapshot) => { snapshot.router.routing_context_chars = value; })} />
+                <NumberField label="判断超时时间（秒）" id="judge-timeout" value={editable.router.judge_timeout_seconds} onChange={(value) => mutate((snapshot) => { snapshot.router.judge_timeout_seconds = value; })} step="0.1" />
+                <NumberField label="判断令牌预算" id="judge-tokens" value={editable.router.judge_max_tokens} onChange={(value) => mutate((snapshot) => { snapshot.router.judge_max_tokens = value; })} />
+                <NumberField label="路由上下文字符数" id="routing-context" value={editable.router.routing_context_chars} onChange={(value) => mutate((snapshot) => { snapshot.router.routing_context_chars = value; })} />
               </div>
               <div className="checkbox-group" aria-label="可用模型">
                 <span>可用模型</span>
@@ -665,15 +739,15 @@ export function ConfigurationPage({
             <fieldset disabled={!editableDraft || actionBusy}>
               <legend>会话路由</legend>
               <div className="checkbox-group">
-                <label><input type="checkbox" checked={editable.session_routing.enabled} onChange={(event) => mutate((snapshot) => { snapshot.session_routing.enabled = event.target.checked; })} />Enabled</label>
-                <label><input type="checkbox" checked={editable.session_routing.rejudge_on_modality_change} onChange={(event) => mutate((snapshot) => { snapshot.session_routing.rejudge_on_modality_change = event.target.checked; })} />Rejudge on modality change</label>
-                <label><input type="checkbox" checked={editable.session_routing.rejudge_on_backend_error} onChange={(event) => mutate((snapshot) => { snapshot.session_routing.rejudge_on_backend_error = event.target.checked; })} />Rejudge on backend error</label>
+                <label><input type="checkbox" checked={editable.session_routing.enabled} onChange={(event) => mutate((snapshot) => { snapshot.session_routing.enabled = event.target.checked; })} />启用会话路由</label>
+                <label><input type="checkbox" checked={editable.session_routing.rejudge_on_modality_change} onChange={(event) => mutate((snapshot) => { snapshot.session_routing.rejudge_on_modality_change = event.target.checked; })} />模态变化时重新判断</label>
+                <label><input type="checkbox" checked={editable.session_routing.rejudge_on_backend_error} onChange={(event) => mutate((snapshot) => { snapshot.session_routing.rejudge_on_backend_error = event.target.checked; })} />上游错误时重新判断</label>
               </div>
               <div className="form-grid">
-                <NumberField label="TTL seconds" id="session-ttl" value={editable.session_routing.ttl_seconds} onChange={(value) => mutate((snapshot) => { snapshot.session_routing.ttl_seconds = value; })} />
-                <NumberField label="Rejudge every user turns" id="session-rejudge" value={editable.session_routing.rejudge_every_user_turns} onChange={(value) => mutate((snapshot) => { snapshot.session_routing.rejudge_every_user_turns = value; })} />
-                <NumberField label="Maximum cache entries" id="session-max" value={editable.session_routing.max_entries} onChange={(value) => mutate((snapshot) => { snapshot.session_routing.max_entries = value; })} />
-                <Field label="Allowed rejudge intervals" htmlFor="session-intervals">
+                <NumberField label="缓存有效期（秒）" id="session-ttl" value={editable.session_routing.ttl_seconds} onChange={(value) => mutate((snapshot) => { snapshot.session_routing.ttl_seconds = value; })} />
+                <NumberField label="每几轮用户消息重新判断" id="session-rejudge" value={editable.session_routing.rejudge_every_user_turns} onChange={(value) => mutate((snapshot) => { snapshot.session_routing.rejudge_every_user_turns = value; })} />
+                <NumberField label="最大缓存条目" id="session-max" value={editable.session_routing.max_entries} onChange={(value) => mutate((snapshot) => { snapshot.session_routing.max_entries = value; })} />
+                <Field label="允许的重新判断间隔" htmlFor="session-intervals">
                   <input
                     id="session-intervals"
                     value={editable.session_routing.allowed_rejudge_intervals.join(", ")}
@@ -694,15 +768,15 @@ export function ConfigurationPage({
                 {aliases.map((alias) => (
                   <article className="backend-card" key={alias}>
                     <h3>{alias} <button type="button" className="danger compact-remove" onClick={() => removeDraftModel(alias)}>删除</button></h3>
-                    <Field label={`${alias} upstream model`} htmlFor={`model-${alias}`}>
+                    <Field label="上游模型" htmlFor={`model-${alias}`}>
                       <input id={`model-${alias}`} value={editable.llms[alias].model} onChange={(event) => mutate((snapshot) => { snapshot.llms[alias].model = event.target.value; })} />
                     </Field>
-                    <Field label={`${alias} description`} htmlFor={`description-${alias}`}>
+                    <Field label="模型说明" htmlFor={`description-${alias}`}>
                       <textarea id={`description-${alias}`} rows={3} value={editable.llms[alias].description} onChange={(event) => mutate((snapshot) => { snapshot.llms[alias].description = event.target.value; })} />
                     </Field>
                     <div className="form-grid">
-                      <NumberField label={`${alias} max tokens`} id={`max-tokens-${alias}`} value={editable.llms[alias].max_tokens} onChange={(value) => mutate((snapshot) => { snapshot.llms[alias].max_tokens = value; })} />
-                      <NumberField label={`${alias} context limit`} id={`context-${alias}`} value={editable.llms[alias].context_limit} onChange={(value) => mutate((snapshot) => { snapshot.llms[alias].context_limit = value; })} />
+                      <NumberField label="最大令牌数" id={`max-tokens-${alias}`} value={editable.llms[alias].max_tokens} onChange={(value) => mutate((snapshot) => { snapshot.llms[alias].max_tokens = value; })} />
+                      <NumberField label="上下文上限" id={`context-${alias}`} value={editable.llms[alias].context_limit} onChange={(value) => mutate((snapshot) => { snapshot.llms[alias].context_limit = value; })} />
                     </div>
                     <small>
                       {summary.read_only.models[alias]?.provider || "未知提供方"} · 凭据 {summary.read_only.models[alias]?.credential.configured ? "已配置" : "缺失"}
@@ -755,8 +829,8 @@ export function ConfigurationPage({
             <div className="table-wrap"><table className="compact-table"><thead><tr><th>版本</th><th>状态</th><th>来源</th><th>创建时间</th><th>发布说明</th><th>操作</th></tr></thead><tbody>
               {versions.items.map((item) => <tr key={item.version_id}>
                 <td>v{item.version_number}</td>
-                <td><span className={`status ${item.publish_state}`}>{item.publish_state}</span></td>
-                <td>{item.source}</td>
+                <td><span className={`status ${item.publish_state}`}>{translateStatus(item.publish_state)}{item.is_active ? " · 当前" : ""}</span></td>
+                <td>{translateSource(item.source)}</td>
                 <td>{new Date(item.created_at).toLocaleString()}</td>
                 <td>{item.release_notes || "—"}</td>
                 <td><div className="actions compact-actions">
@@ -766,36 +840,34 @@ export function ConfigurationPage({
               </tr>)}
             </tbody></table></div>
           )}
+          <div className="pagination"><button className="secondary" disabled={!versions || versionPage <= 1} onClick={() => setVersionPage((value) => Math.max(1, value - 1))}>上一页</button><span>第 {versionPage} 页 · {versions?.total ?? 0} 个版本</span><button className="secondary" disabled={!versions || versionPage * versions.page_size >= versions.total} onClick={() => setVersionPage((value) => value + 1)}>下一页</button></div>
         </section>
         <section className="panel">
-          <div className="panel-title"><h2>最近审计</h2><span>不记录请求或提示词正文</span></div>
+          <div className="panel-title"><h2>操作审计</h2><span>不记录请求或提示词正文</span></div>
           {!audit?.items.length ? <div className="state">暂无管理事件。</div> : (
             <div className="audit-list">
               {audit.items.map((item) => <article key={item.audit_id}>
-                <div><strong>{item.action}</strong><span className={`status ${item.outcome}`}>{item.outcome}</span></div>
-                <small>{new Date(item.occurred_at).toLocaleString()} · {item.subject_type || "system"}</small>
+                <div><strong>{translateAuditAction(item.action)}</strong><span className={`status ${item.outcome}`}>{translateStatus(item.outcome)}</span></div>
+                <small>{new Date(item.occurred_at).toLocaleString()} · {item.subject_type === "system" ? "系统" : item.subject_type || "系统"}</small>
                 <code>{JSON.stringify(item.summary)}</code>
               </article>)}
             </div>
           )}
+          <div className="pagination"><button className="secondary" disabled={!audit || auditPage <= 1} onClick={() => setAuditPage((value) => Math.max(1, value - 1))}>上一页</button><span>第 {auditPage} 页 · {audit?.total ?? 0} 条操作</span><button className="secondary" disabled={!audit || auditPage * audit.page_size >= audit.total} onClick={() => setAuditPage((value) => value + 1)}>下一页</button></div>
         </section>
       </div>}
 
-      {view === "route-lab" && <div className="configuration-columns">
-        <section className="panel">
-          <div className="panel-title"><h2>Route Lab</h2><span>仅用于管理员测试，不会保存输入</span></div>
-          <Field label="任务文本" htmlFor="route-lab-text">
-            <textarea id="route-lab-text" rows={5} value={labText} onChange={(event) => setLabText(event.target.value)} placeholder="输入临时路由任务" />
-          </Field>
-          <div className="form-grid">
-            <Field label="版本 ID（可选）" htmlFor="route-lab-version">
-              <input id="route-lab-version" value={labVersionId} onChange={(event) => setLabVersionId(event.target.value)} inputMode="numeric" />
-            </Field>
-            <div className="actions"><button onClick={() => void runLab()} disabled={actionBusy || !labText.trim()}>评估路由</button></div>
-          </div>
-          {labResult && <div className="notice">已选择 <strong>{labResult.result.selected_model}</strong> · {labResult.result.judge_status} · {labResult.result.judge_latency_ms == null ? "未使用判断模型" : `${labResult.result.judge_latency_ms.toFixed(1)} ms`} · 不会持久化</div>}
-        </section>
-      </div>}
+      {view === "route-lab" && <section className="panel route-chat-panel">
+        <div className="panel-title"><div><h2>路由测试</h2><span>仅用于管理员测试，不会保存输入</span></div><label className="field route-version-field"><span>测试版本 ID（可选）</span><input id="route-lab-version" value={labVersionId} onChange={(event) => setLabVersionId(event.target.value)} inputMode="numeric" /></label></div>
+        <div className="chat-thread" aria-live="polite">
+          {!labMessages.length && <div className="chat-empty"><strong>开始测试智能路由</strong><span>输入一段任务文本，查看系统选择的模型和判断耗时。</span></div>}
+          {labMessages.map((message, index) => <div key={`${message.role}-${index}`} className={`chat-message ${message.role}`}><div className="chat-bubble">{message.text}</div>{message.meta && <small>{message.meta}</small>}</div>)}
+        </div>
+        <form className="chat-composer" onSubmit={(event) => { event.preventDefault(); void runLab(); }}>
+          <textarea id="route-lab-text" rows={3} value={labText} onChange={(event) => setLabText(event.target.value)} placeholder="输入要测试的任务，例如：帮我总结这份报告" />
+          <button type="submit" disabled={actionBusy || !labText.trim()}>发送测试</button>
+        </form>
+      </section>}
     </div>
   );
 }
@@ -826,6 +898,14 @@ function NumberField({
   step?: string;
 }) {
   return <Field label={label} htmlFor={id}><input id={id} type="number" step={step} value={value} onChange={(event) => onChange(event.currentTarget.valueAsNumber)} /></Field>;
+}
+
+function Toast({ message, tone = "success", onClose }: { message: string; tone?: "success" | "error"; onClose: () => void }) {
+  useEffect(() => {
+    const timer = window.setTimeout(onClose, 4200);
+    return () => window.clearTimeout(timer);
+  }, [message, onClose]);
+  return <div className={`toast ${tone}`} role={tone === "error" ? "alert" : "status"}><span>{message}</span><button className="toast-close" type="button" aria-label="关闭通知" onClick={onClose}>×</button></div>;
 }
 
 function Metric({ label, value, hint }: { label: string; value: string; hint?: string }) {

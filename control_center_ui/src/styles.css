@@ -33,10 +33,16 @@ td small { display: block; margin-top: .28rem; } code { color: #a7f3d0; }
 .state { color: #8491a1; padding: 2rem; text-align: center; }
 .error { color: #fecdd3; background: #3b1620; border: 1px solid #7f1d33; border-radius: 8px; padding: .8rem; margin: .8rem 0; }
 .notice { color: #bbf7d0; background: #102d22; border: 1px solid #236b4a; border-radius: 8px; padding: .8rem; margin: .8rem 0; }
+.toast { position: fixed; top: 1.25rem; right: 1.25rem; z-index: 40; display: flex; align-items: center; gap: .75rem; width: min(420px, calc(100vw - 2rem)); padding: .85rem 1rem; color: #d1fae5; background: #102d22; border: 1px solid #2d8a60; border-radius: 10px; box-shadow: 0 18px 50px rgba(0,0,0,.35); }
+.toast.error { color: #fecdd3; background: #3b1620; border-color: #7f1d33; }
+.toast-close { flex: 0 0 auto; padding: .2rem .45rem; color: #bbf7d0; background: transparent; font-size: 1.1rem; line-height: 1; }
 .configuration-summary { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .configuration-title { align-items: flex-start; }
 .configuration-title > div:first-child { display: grid; gap: .35rem; }
 .configuration-title .actions { justify-content: flex-end; flex-wrap: wrap; }
+.active-route-list { display: grid; gap: .6rem; margin-top: 1rem; padding-top: .9rem; border-top: 1px solid #202b38; color: #aab5c2; font-size: .8rem; }
+.active-route-list > div { display: flex; flex-wrap: wrap; gap: .5rem; }
+.route-tag { padding: .35rem .6rem; color: #bbf7d0; background: #102d22; border: 1px solid #236b4a; border-radius: 999px; }
 .configuration-columns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: .9rem; }
 .configuration-columns > .panel { min-width: 0; }
 .field { display: grid; gap: .4rem; color: #aab5c2; font-size: .8rem; }
@@ -73,12 +79,31 @@ button.danger { color: #fecdd3; background: #3b1620; border: 1px solid #7f1d33; 
 .login-card p { color: #91a0b1; line-height: 1.55; } .login-card label { font-size: .8rem; color: #aab5c2; }
 .modal-backdrop { position: fixed; inset: 0; display: grid; place-items: center; padding: 1rem; background: rgba(0,0,0,.65); z-index: 20; }
 .modal { width: min(460px, 100%); display: grid; gap: 1rem; padding: 1.2rem; background: #111720; border: 1px solid #2a3543; border-radius: 12px; box-shadow: 0 24px 80px rgba(0,0,0,.45); }
-.model-menu { display: grid; gap: .6rem; margin-top: .8rem; padding: .9rem; border: 1px solid #2a3543; border-radius: 8px; background: #0b1017; max-height: 360px; overflow: auto; }
-.model-menu label { display: flex; align-items: center; gap: .5rem; color: #dbe5ef; }
-.model-menu input[type="checkbox"] { width: auto; }
+.model-menu { display: grid; grid-template-rows: auto minmax(160px, 1fr) auto; gap: .75rem; margin-top: .8rem; padding: .9rem; border: 1px solid #2a3543; border-radius: 8px; background: #0b1017; max-height: 520px; overflow: hidden; }
+.model-menu-toolbar { display: grid; gap: .7rem; position: sticky; top: 0; z-index: 1; background: #0b1017; }
+.selected-models { display: flex; flex-wrap: wrap; align-items: center; gap: .45rem; color: #aab5c2; font-size: .78rem; }
+.selected-models > span { flex: 0 0 100%; color: #70d5ff; font-weight: 700; }
+.model-chip { padding: .35rem .55rem; color: #dbe5ef; background: #172431; border: 1px solid #31506a; font-size: .72rem; }
+.model-results { min-height: 0; overflow: auto; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .55rem; align-content: start; padding-right: .2rem; }
+.model-option { min-width: 0; overflow-wrap: anywhere; color: #dbe5ef; background: #111b25; border: 1px solid #2a3543; text-align: left; font-size: .78rem; }
+.model-option.selected { color: #061017; background: #70d5ff; border-color: #70d5ff; }
+.model-menu-actions { position: sticky; bottom: 0; z-index: 1; padding-top: .6rem; background: #0b1017; }
 .model-add-row { margin-top: .8rem; }
 .model-add-row input { flex: 1; }
 .compact-remove { padding: .25rem .45rem; font-size: .7rem; }
+.route-chat-panel { display: grid; grid-template-rows: auto minmax(360px, 1fr) auto; min-height: 620px; }
+.route-version-field { width: 180px; }
+.chat-thread { min-height: 360px; max-height: 560px; overflow: auto; display: flex; flex-direction: column; gap: 1rem; padding: 1rem; margin-bottom: .9rem; background: #090d13; border: 1px solid #202b38; border-radius: 10px; }
+.chat-empty { flex: 1; display: grid; place-content: center; gap: .45rem; color: #8996a6; text-align: center; }
+.chat-empty strong { color: #dbe5ef; font-size: 1rem; }
+.chat-message { display: grid; gap: .35rem; max-width: min(78%, 760px); }
+.chat-message.user { align-self: flex-end; justify-items: end; }
+.chat-message.assistant { align-self: flex-start; }
+.chat-bubble { padding: .75rem .9rem; color: #dbe5ef; background: #162333; border: 1px solid #2a4358; border-radius: 12px; line-height: 1.55; white-space: pre-wrap; }
+.chat-message.user .chat-bubble { color: #061017; background: #70d5ff; border-color: #70d5ff; }
+.chat-message small { color: #8996a6; }
+.chat-composer { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: .75rem; }
+.chat-composer textarea { min-height: 76px; }
 @media (max-width: 1100px) { .cards { grid-template-columns: repeat(3, 1fr); } .configuration-columns { grid-template-columns: 1fr; } .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 720px) { .shell { padding: 1rem; } header { align-items: flex-start; flex-direction: column; } .actions { flex-wrap: wrap; } .cards, .configuration-summary { grid-template-columns: repeat(2, 1fr); } .bar-row { grid-template-columns: 90px 1fr 40px; } .backend-grid, .form-grid { grid-template-columns: 1fr; } .configuration-title { flex-direction: column; } }
+@media (max-width: 720px) { .shell { padding: 1rem; } header { align-items: flex-start; flex-direction: column; } .actions { flex-wrap: wrap; } .cards, .configuration-summary { grid-template-columns: repeat(2, 1fr); } .bar-row { grid-template-columns: 90px 1fr 40px; } .backend-grid, .form-grid { grid-template-columns: 1fr; } .configuration-title { flex-direction: column; } .model-results { grid-template-columns: repeat(2, minmax(0, 1fr)); } .chat-composer { grid-template-columns: 1fr; } .route-version-field { width: 100%; } }
 @media (max-width: 430px) { .cards { grid-template-columns: 1fr; } }

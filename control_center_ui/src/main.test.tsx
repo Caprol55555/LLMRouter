@@ -68,7 +68,7 @@ describe("Control Center dashboard states", () => {
     fireEvent.change(input, { target: { value: "not-the-token" } });
     fireEvent.submit(screen.getByRole("button", { name: "登录" }).closest("form")!);
     const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("Invalid administrator credentials");
+    expect(alert.textContent).toContain("管理员密码错误");
     expect(alert.textContent).not.toContain("not-the-token");
   });
 
@@ -113,7 +113,7 @@ describe("Control Center dashboard states", () => {
     );
     render(<App />);
     await waitFor(() => {
-      expect(screen.getByRole("alert").textContent).toContain("Telemetry is unavailable");
+      expect(screen.getByRole("alert").textContent).toContain("遥测数据不可用");
     });
   });
 });

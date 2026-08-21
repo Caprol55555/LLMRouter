@@ -53,6 +53,35 @@ type Health = {
   telemetry?: { status: string; dropped_events: number; database_errors: number; queue_depth: number };
 };
 
+function translateValue(value: string | null | undefined): string {
+  const labels: Record<string, string> = {
+    success: "成功",
+    error: "错误",
+    disconnected: "已断开",
+    hit: "命中",
+    miss: "未命中",
+    bypass: "未使用缓存",
+    not_called: "未调用",
+    called: "已调用",
+    used: "已使用",
+    fallback: "已回退",
+    rejudge: "重新判断",
+    backend_error: "上游错误",
+    pending: "待发布",
+    active: "已启用",
+    editing: "编辑中",
+    ready: "已校验",
+    finalized: "已生成版本",
+    production: "生产流量",
+    admin_test: "管理员测试",
+    deployment_smoke: "部署冒烟",
+    success_rate: "成功率",
+    ok: "正常",
+    unknown: "未知",
+  };
+  return value && labels[value] ? labels[value] : value || "—";
+}
+
 function fmtNumber(value: number | null, suffix = "") {
   return value == null ? "—" : `${value.toFixed(value >= 100 ? 0 : 1)}${suffix}`;
 }
@@ -69,7 +98,6 @@ export function App() {
   const [health, setHealth] = useState<Health | null>(null);
   const [requests, setRequests] = useState<RequestPage | null>(null);
   const [windowKey, setWindowKey] = useState<"1h" | "24h" | "7d">("24h");
-  const [timezone, setTimezone] = useState<"local" | "utc">("local");
   const [page, setPage] = useState(1);
   const [trafficClass, setTrafficClass] = useState("");
   const [selectedModel, setSelectedModel] = useState("");
@@ -206,22 +234,20 @@ export function App() {
         <div>
           <div className="eyebrow">路由可观测性</div>
           <h1>LLMRouter 管理中心</h1>
-          <p>{runtime ? `${runtime.strategy} · 数据结构 v${runtime.schema_version ?? "?"} · ${runtime.commit.slice(0, 12)}` : "正在加载运行时…"}</p>
         </div>
         <div className="actions">
-          <button className="secondary" onClick={() => setTimezone(timezone === "local" ? "utc" : "local")}>{timezone === "local" ? "本地时间" : "UTC"}</button>
           <button className="secondary" onClick={() => void load()}>刷新</button>
           <button className="secondary" onClick={() => setPasswordOpen(true)}>修改密码</button>
           <button className="secondary" onClick={() => void logout()}>退出登录</button>
         </div>
       </header>
 
-      {error && <div className="error" role="alert">{error}</div>}
+      {error && <Toast message={error} tone="error" onClose={() => setError("")} />}
       <nav className="primary-nav" aria-label="管理中心页面">
         <button className={section === "overview" ? "active" : "secondary"} onClick={() => setSection("overview")}>概览</button>
         <button className={section === "activity" ? "active" : "secondary"} onClick={() => setSection("activity")}>活动记录</button>
         <button className={section === "configuration" ? "active" : "secondary"} onClick={() => setSection("configuration")}>配置</button>
-        <button className={section === "route-lab" ? "active" : "secondary"} onClick={() => setSection("route-lab")}>Route Lab</button>
+        <button className={section === "route-lab" ? "active" : "secondary"} onClick={() => setSection("route-lab")}>路由测试</button>
       </nav>
 
       {section === "configuration" ? (
@@ -230,14 +256,14 @@ export function App() {
         <ConfigurationPage csrf={csrf} onUnauthorized={() => setAuthenticated(false)} view="route-lab" />
       ) : section === "activity" ? (
         <>
-          <RequestsPanel requests={requests} runtime={runtime} loading={loading} timezone={timezone} requestWindow={requestWindow} setRequestWindow={setRequestWindow} trafficClass={trafficClass} setTrafficClass={setTrafficClass} selectedModel={selectedModel} setSelectedModel={setSelectedModel} finalStatus={finalStatus} setFinalStatus={setFinalStatus} page={page} setPage={setPage} />
+          <RequestsPanel requests={requests} runtime={runtime} loading={loading} requestWindow={requestWindow} setRequestWindow={setRequestWindow} trafficClass={trafficClass} setTrafficClass={setTrafficClass} selectedModel={selectedModel} setSelectedModel={setSelectedModel} finalStatus={finalStatus} setFinalStatus={setFinalStatus} page={page} setPage={setPage} />
           <ConfigurationPage csrf={csrf} onUnauthorized={() => setAuthenticated(false)} view="activity" />
         </>
       ) : (
         <>
           <nav aria-label="统计时间范围">
             {(["1h", "24h", "7d"] as const).map((item) => (
-              <button key={item} className={windowKey === item ? "active" : "secondary"} onClick={() => setWindowKey(item)}>{item}</button>
+              <button key={item} className={windowKey === item ? "active" : "secondary"} onClick={() => setWindowKey(item)}>{{ "1h": "1 小时", "24h": "24 小时", "7d": "7 天" }[item]}</button>
             ))}
           </nav>
           {loading && !overview ? <div className="state">正在加载遥测数据…</div> : summary && (
@@ -256,7 +282,7 @@ export function App() {
             <div className="panel-title"><h2>模型分布</h2><span>{windowKey}</span></div>
             {summary.model_distribution.length === 0 ? <div className="state">此时间范围内没有路由请求。</div> : summary.model_distribution.map((item) => (
               <div className="bar-row" key={item.model || "unknown"}>
-                <span>{item.model || "unknown"}</span>
+                <span>{item.model || "未知"}</span>
                 <div className="bar-track"><div className="bar" style={{ width: `${(item.count / modelMax) * 100}%` }} /></div>
                 <strong>{item.count}</strong>
               </div>
@@ -265,41 +291,9 @@ export function App() {
             </>
           )}
 
-          {false && <section className="panel">
-        <div className="panel-title"><h2>请求</h2><span>仅展示结构化元数据</span></div>
-        <div className="filters">
-          <select aria-label="Request time window" value={requestWindow} onChange={(event) => { setPage(1); setRequestWindow(event.target.value as "1h" | "24h" | "7d"); }}>
-            <option value="1h">Last hour</option><option value="24h">Last 24 hours</option><option value="7d">Last 7 days</option>
-          </select>
-          <select aria-label="Traffic class" value={trafficClass} onChange={(event) => { setPage(1); setTrafficClass(event.target.value); }}>
-            <option value="">All traffic</option><option value="production">Production</option><option value="admin_test">Admin test</option><option value="deployment_smoke">Deployment smoke</option>
-          </select>
-          <select aria-label="Selected model" value={selectedModel} onChange={(event) => { setPage(1); setSelectedModel(event.target.value); }}>
-            <option value="">All models</option>{runtime?.models.map((model) => <option key={model.name} value={model.name}>{model.name}</option>)}
-          </select>
-          <select aria-label="Final status" value={finalStatus} onChange={(event) => { setPage(1); setFinalStatus(event.target.value); }}>
-            <option value="">All statuses</option><option value="success">Success</option><option value="error">Error</option><option value="disconnected">Disconnected</option>
-          </select>
-        </div>
-        {!requests?.items.length ? <div className="state">No requests match the current filters.</div> : (
-          <div className="table-wrap"><table><thead><tr><th>Time</th><th>Request</th><th>Policy</th><th>Cache / judge</th><th>Model</th><th>Status</th><th>Latency</th><th>Tokens</th></tr></thead><tbody>
-            {requests?.items.map((item) => <tr key={item.event_id}>
-              <td>{new Intl.DateTimeFormat(undefined, { dateStyle: "short", timeStyle: "medium", timeZone: timezone === "utc" ? "UTC" : undefined }).format(new Date(item.occurred_at))}{timezone === "utc" ? " UTC" : ""}</td>
-              <td><code>{item.request_id.slice(0, 12)}</code><small>{item.traffic_class}</small></td>
-              <td>{item.requested_model}<small>{item.rejudge_reason || "—"}</small></td>
-              <td>{item.cache_status || "—"}<small>{item.judge_status || "—"}</small></td>
-              <td>{item.selected_model || "—"}{item.fallback ? <small>fallback</small> : null}</td>
-              <td><span className={`status ${item.final_status}`}>{item.final_status || "unknown"}</span><small>{item.error_category || "—"}</small></td>
-              <td>{fmtNumber(item.total_latency_ms, " ms")}<small>TTFB {fmtNumber(item.first_byte_latency_ms, " ms")}</small></td>
-              <td>{item.total_tokens ?? "—"}</td>
-            </tr>)}
-          </tbody></table></div>
-        )}
-        <div className="pagination"><button className="secondary" disabled={!requests || page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>Previous</button><span>Page {page} · {requests?.total ?? 0} requests</span><button className="secondary" disabled={!requests || page * (requests?.page_size ?? 0) >= (requests?.total ?? 0)} onClick={() => setPage((value) => value + 1)}>Next</button></div>
-          </section>}
         </>
       )}
-      {passwordNotice && <div className="notice" role="status">{passwordNotice}</div>}
+      {passwordNotice && !passwordOpen && <Toast message={passwordNotice} onClose={() => setPasswordNotice("")} />}
       {passwordOpen && <div className="modal-backdrop"><form className="modal" onSubmit={changePassword}><div className="panel-title"><h2>修改密码</h2><button type="button" className="secondary" onClick={() => setPasswordOpen(false)}>关闭</button></div><label className="field"><span>当前密码</span><input type="password" value={passwordForm.current} onChange={(e) => setPasswordForm({ ...passwordForm, current: e.target.value })} required /></label><label className="field"><span>新密码</span><input type="password" minLength={8} value={passwordForm.next} onChange={(e) => setPasswordForm({ ...passwordForm, next: e.target.value })} required /></label><label className="field"><span>确认新密码</span><input type="password" minLength={8} value={passwordForm.confirm} onChange={(e) => setPasswordForm({ ...passwordForm, confirm: e.target.value })} required /></label>{passwordNotice && <div className="error">{passwordNotice}</div>}<button type="submit">保存密码</button></form></div>}
     </main>
   );
@@ -310,13 +304,12 @@ function Metric({ label, value, hint }: { label: string; value: string; hint?: s
 }
 
 function RequestsPanel({
-  requests, runtime, loading, timezone, requestWindow, setRequestWindow, trafficClass, setTrafficClass,
+  requests, runtime, loading, requestWindow, setRequestWindow, trafficClass, setTrafficClass,
   selectedModel, setSelectedModel, finalStatus, setFinalStatus, page, setPage,
 }: {
   requests: RequestPage | null;
   runtime: Runtime | null;
   loading: boolean;
-  timezone: "local" | "utc";
   requestWindow: "1h" | "24h" | "7d";
   setRequestWindow: (value: "1h" | "24h" | "7d") => void;
   trafficClass: string;
@@ -328,7 +321,15 @@ function RequestsPanel({
   page: number;
   setPage: (value: number | ((value: number) => number)) => void;
 }) {
-  return <section className="panel"><div className="panel-title"><h2>请求记录</h2><span>仅展示结构化元数据</span></div><div className="filters"><select aria-label="请求时间范围" value={requestWindow} onChange={(event) => { setPage(1); setRequestWindow(event.target.value as "1h" | "24h" | "7d"); }}><option value="1h">最近 1 小时</option><option value="24h">最近 24 小时</option><option value="7d">最近 7 天</option></select><select aria-label="流量类型" value={trafficClass} onChange={(event) => { setPage(1); setTrafficClass(event.target.value); }}><option value="">全部流量</option><option value="production">生产流量</option><option value="admin_test">管理员测试</option><option value="deployment_smoke">部署冒烟</option></select><select aria-label="已选模型" value={selectedModel} onChange={(event) => { setPage(1); setSelectedModel(event.target.value); }}><option value="">全部模型</option>{runtime?.models.map((model) => <option key={model.name} value={model.name}>{model.name}</option>)}</select><select aria-label="最终状态" value={finalStatus} onChange={(event) => { setPage(1); setFinalStatus(event.target.value); }}><option value="">全部状态</option><option value="success">成功</option><option value="error">错误</option><option value="disconnected">断开</option></select></div>{loading && !requests ? <div className="state">正在加载请求记录…</div> : !requests?.items.length ? <div className="state">没有符合条件的请求。</div> : <div className="table-wrap"><table><thead><tr><th>时间</th><th>请求</th><th>策略</th><th>缓存 / 判断</th><th>模型</th><th>状态</th><th>延迟</th><th>令牌</th></tr></thead><tbody>{requests.items.map((item) => <tr key={item.event_id}><td>{new Intl.DateTimeFormat(undefined, { dateStyle: "short", timeStyle: "medium", timeZone: timezone === "utc" ? "UTC" : undefined }).format(new Date(item.occurred_at))}</td><td><code>{item.request_id.slice(0, 12)}</code><small>{item.traffic_class}</small></td><td>{item.requested_model}<small>{item.rejudge_reason || "—"}</small></td><td>{item.cache_status || "—"}<small>{item.judge_status || "—"}</small></td><td>{item.selected_model || "—"}</td><td><span className={`status ${item.final_status}`}>{item.final_status || "未知"}</span></td><td>{fmtNumber(item.total_latency_ms, " ms")}</td><td>{item.total_tokens ?? "—"}</td></tr>)}</tbody></table></div>}<div className="pagination"><button className="secondary" disabled={!requests || page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</button><span>第 {page} 页 · {requests?.total ?? 0} 条</span><button className="secondary" disabled={!requests || page * requests.page_size >= requests.total} onClick={() => setPage((value) => value + 1)}>下一页</button></div></section>;
+  return <section className="panel"><div className="panel-title"><h2>请求记录</h2><span>仅展示结构化元数据</span></div><div className="filters"><select aria-label="请求时间范围" value={requestWindow} onChange={(event) => { setPage(1); setRequestWindow(event.target.value as "1h" | "24h" | "7d"); }}><option value="1h">最近 1 小时</option><option value="24h">最近 24 小时</option><option value="7d">最近 7 天</option></select><select aria-label="流量类型" value={trafficClass} onChange={(event) => { setPage(1); setTrafficClass(event.target.value); }}><option value="">全部流量</option><option value="production">生产流量</option><option value="admin_test">管理员测试</option><option value="deployment_smoke">部署冒烟</option></select><select aria-label="已选模型" value={selectedModel} onChange={(event) => { setPage(1); setSelectedModel(event.target.value); }}><option value="">全部模型</option>{runtime?.models.map((model) => <option key={model.name} value={model.name}>{model.name}</option>)}</select><select aria-label="最终状态" value={finalStatus} onChange={(event) => { setPage(1); setFinalStatus(event.target.value); }}><option value="">全部状态</option><option value="success">成功</option><option value="error">错误</option><option value="disconnected">断开</option></select></div>{loading && !requests ? <div className="state">正在加载请求记录…</div> : !requests?.items.length ? <div className="state">没有符合条件的请求。</div> : <div className="table-wrap"><table><thead><tr><th>时间</th><th>请求</th><th>策略</th><th>缓存 / 判断</th><th>模型</th><th>状态</th><th>延迟</th><th>令牌</th></tr></thead><tbody>{requests.items.map((item) => <tr key={item.event_id}><td>{new Intl.DateTimeFormat(undefined, { dateStyle: "short", timeStyle: "medium" }).format(new Date(item.occurred_at))}</td><td><code>{item.request_id.slice(0, 12)}</code><small>{translateValue(item.traffic_class)}</small></td><td>{item.requested_model}<small>{translateValue(item.rejudge_reason)}</small></td><td>{translateValue(item.cache_status)}<small>{translateValue(item.judge_status)}</small></td><td>{item.selected_model || "—"}</td><td><span className={`status ${item.final_status}`}>{translateValue(item.final_status)}</span></td><td>{fmtNumber(item.total_latency_ms, " ms")}</td><td>{item.total_tokens ?? "—"}</td></tr>)}</tbody></table></div>}<div className="pagination"><button className="secondary" disabled={!requests || page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</button><span>第 {page} 页 · {requests?.total ?? 0} 条</span><button className="secondary" disabled={!requests || page * requests.page_size >= requests.total} onClick={() => setPage((value) => value + 1)}>下一页</button></div></section>;
+}
+
+function Toast({ message, tone = "success", onClose }: { message: string; tone?: "success" | "error"; onClose: () => void }) {
+  useEffect(() => {
+    const timer = window.setTimeout(onClose, 4200);
+    return () => window.clearTimeout(timer);
+  }, [message, onClose]);
+  return <div className={`toast ${tone}`} role={tone === "error" ? "alert" : "status"}><span>{message}</span><button className="toast-close" type="button" aria-label="关闭通知" onClick={onClose}>×</button></div>;
 }
 
 const root = document.getElementById("root");

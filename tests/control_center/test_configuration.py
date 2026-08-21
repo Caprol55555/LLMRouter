@@ -388,24 +388,24 @@ def test_configuration_api_requires_session_origin_and_csrf(temp_data_dir: Path,
 
     anonymous = TestClient(create_app(config=build_config(temp_data_dir)))
     assert anonymous.post(
-        "/admin/api/configuration/drafts",
+        "/admin/api/configuration/routes",
         headers=ORIGIN,
         json={},
     ).status_code == 401
     assert client.post(
-        "/admin/api/configuration/drafts",
+        "/admin/api/configuration/routes",
         headers={"Origin": "http://localhost:9999", "Host": "localhost"},
         json={},
     ).status_code == 403
     created = client.post(
-        "/admin/api/configuration/drafts",
+        "/admin/api/configuration/routes",
         headers=write_headers(csrf),
         json={"release_notes": "API draft"},
     )
     assert created.status_code == 201
     draft = created.json()
     assert client.put(
-        f"/admin/api/configuration/drafts/{draft['draft_id']}",
+        f"/admin/api/configuration/routes/{draft['draft_id']}",
         headers=write_headers(csrf),
         json={
             "revision": draft["revision"],

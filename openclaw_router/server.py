@@ -1341,8 +1341,8 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                 "schema_version": 1,
                 "active": service.active_configuration(),
                 "read_only": service.read_only_metadata(),
-                "drafts": service.list_drafts(),
-                "active_drafts": service.list_active_drafts(),
+                "smart_routes": service.list_drafts(),
+                "active_smart_routes": service.list_active_drafts(),
                 "model_catalog": service.model_catalog(),
             },
             headers={"Cache-Control": "no-store"},
@@ -1364,7 +1364,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
             headers={"Cache-Control": "no-store"},
         )
 
-    @protected_admin.get("/configuration/drafts", include_in_schema=False)
+    @protected_admin.get("/configuration/routes", include_in_schema=False)
     async def admin_configuration_drafts():
         return JSONResponse(
             {"items": configuration_service().list_drafts()},
@@ -1372,7 +1372,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
         )
 
     @protected_admin.get(
-        "/configuration/drafts/{draft_id}", include_in_schema=False
+        "/configuration/routes/{draft_id}", include_in_schema=False
     )
     async def admin_configuration_draft(draft_id: str):
         return JSONResponse(
@@ -1381,7 +1381,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
         )
 
     @protected_admin.get(
-        "/configuration/drafts/{draft_id}/diff", include_in_schema=False
+        "/configuration/routes/{draft_id}/diff", include_in_schema=False
     )
     async def admin_configuration_draft_diff(draft_id: str):
         return JSONResponse(
@@ -1406,7 +1406,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
         )
         return JSONResponse(report, headers={"Cache-Control": "no-store"})
 
-    @protected_admin_write.post("/configuration/drafts", include_in_schema=False)
+    @protected_admin_write.post("/configuration/routes", include_in_schema=False)
     async def create_configuration_draft(request: Request):
         body = strict_object(
             await read_admin_json(request),
@@ -1429,7 +1429,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
         )
 
     @protected_admin_write.put(
-        "/configuration/drafts/{draft_id}", include_in_schema=False
+        "/configuration/routes/{draft_id}", include_in_schema=False
     )
     async def update_configuration_draft(draft_id: str, request: Request):
         body = strict_object(
@@ -1452,7 +1452,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
         )
 
     @protected_admin_write.post(
-        "/configuration/drafts/{draft_id}/validate", include_in_schema=False
+        "/configuration/routes/{draft_id}/validate", include_in_schema=False
     )
     async def validate_configuration_draft(draft_id: str, request: Request):
         body = strict_object(
@@ -1471,7 +1471,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
         )
 
     @protected_admin_write.post(
-        "/configuration/drafts/{draft_id}/activation", include_in_schema=False
+        "/configuration/routes/{draft_id}/activation", include_in_schema=False
     )
     async def set_configuration_draft_activation(draft_id: str, request: Request):
         body = strict_object(await read_admin_json(request), allowed={"active"}, required={"active"})
@@ -1495,7 +1495,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
         return JSONResponse({"models": configuration_service().replace_model_catalog(models)}, headers={"Cache-Control": "no-store"})
 
     @protected_admin_write.post(
-        "/configuration/drafts/{draft_id}/finalize", include_in_schema=False
+        "/configuration/routes/{draft_id}/finalize", include_in_schema=False
     )
     async def finalize_configuration_draft(draft_id: str, request: Request):
         body = strict_object(
@@ -1606,20 +1606,20 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
     async def evaluate_route_lab(request: Request):
         body = strict_object(
             await read_admin_json(request),
-            allowed={"text", "version_id", "draft_id", "compare_version_id"},
+            allowed={"text", "version_id", "route_id", "compare_version_id"},
             required={"text"},
         )
         text_value = body["text"]
         if not isinstance(text_value, str) or not text_value.strip() or len(text_value) > 20_000:
             raise SnapshotStructureError("text must be a non-empty string up to 20000 characters")
         version_id = body.get("version_id")
-        draft_id = body.get("draft_id")
+        draft_id = body.get("route_id")
         compare_version_id = body.get("compare_version_id")
         for name, value in (("version_id", version_id), ("compare_version_id", compare_version_id)):
             if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
                 raise SnapshotStructureError(f"{name} must be an integer")
         if draft_id is not None and (not isinstance(draft_id, str) or len(draft_id) > 128):
-            raise SnapshotStructureError("draft_id is invalid")
+            raise SnapshotStructureError("route_id is invalid")
 
         current = current_runtime()
         service = configuration_service()
@@ -1706,7 +1706,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
         return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
     @protected_admin_write.delete(
-        "/configuration/drafts/{draft_id}", include_in_schema=False
+        "/configuration/routes/{draft_id}", include_in_schema=False
     )
     async def delete_configuration_draft(draft_id: str, revision: int):
         configuration_service().delete_draft(

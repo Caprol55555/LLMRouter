@@ -101,8 +101,8 @@ function pageSummary(drafts: ReturnType<typeof draft>[] = []) {
   return {
     active,
     read_only: readOnly,
-    drafts: drafts.map(({ snapshot: _snapshot, ...item }) => item),
-    active_drafts: drafts.filter((item) => item.is_active).map(({ snapshot: _snapshot, ...item }) => item),
+    smart_routes: drafts.map(({ snapshot: _snapshot, ...item }) => item),
+    active_smart_routes: drafts.filter((item) => item.is_active).map(({ snapshot: _snapshot, ...item }) => item),
     model_catalog: ["glm-upstream", "qwen-upstream"],
   };
 }
@@ -114,7 +114,7 @@ function commonGet(path: string, drafts: ReturnType<typeof draft>[] = []) {
   }
   if (path === "/admin/api/audit") return response({ items: [], page: 1, page_size: 20, total: 0 });
   if (path.endsWith("/diff")) return response({ changes: [] });
-  if (path === "/admin/api/configuration/drafts/draft-test-id") return response(drafts[0]);
+  if (path === "/admin/api/configuration/routes/draft-test-id") return response(drafts[0]);
   return response({ error: { message: `Unexpected request ${path}` } }, 500);
 }
 
@@ -133,7 +133,7 @@ describe("Configuration page", () => {
 
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => commonGet(details(input).path)));
     const emptyView = render(<ConfigurationPage csrf="csrf-value" onUnauthorized={vi.fn()} />);
-    expect(await screen.findByText("暂无草稿，请从当前版本新建。")).toBeTruthy();
+    expect(await screen.findByText("暂无智能路由版本，请新建一个版本。")).toBeTruthy();
     emptyView.unmount();
     render(<ConfigurationPage csrf="csrf-value" onUnauthorized={vi.fn()} view="activity" />);
     expect(await screen.findByText("暂无管理事件。")).toBeTruthy();
@@ -143,7 +143,7 @@ describe("Configuration page", () => {
     vi.stubGlobal("fetch", vi.fn(() => response({ error: { message: "Configuration storage is unavailable" } }, 503)));
     const unauthorized = vi.fn();
     const view = render(<ConfigurationPage csrf="csrf-value" onUnauthorized={unauthorized} />);
-    expect((await screen.findByRole("alert")).textContent).toContain("Configuration storage is unavailable");
+    expect((await screen.findByRole("alert")).textContent).toContain("配置存储不可用");
     view.unmount();
 
     vi.stubGlobal("fetch", vi.fn(() => response({ error: { message: "Administrator session is required" } }, 401)));
@@ -157,7 +157,7 @@ describe("Configuration page", () => {
     const writes: Array<{ path: string; method: string; init?: RequestInit }> = [];
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const request = details(input, init);
-      if (request.method === "POST" && request.path === "/admin/api/configuration/drafts") {
+      if (request.method === "POST" && request.path === "/admin/api/configuration/routes") {
         current = draft();
         exists = true;
         writes.push(request);
@@ -178,11 +178,11 @@ describe("Configuration page", () => {
     }));
 
     render(<ConfigurationPage csrf="csrf-value" onUnauthorized={vi.fn()} />);
-    fireEvent.click(await screen.findByRole("button", { name: "新建草稿" }));
+    fireEvent.click(await screen.findByRole("button", { name: "新建智能路由版本" }));
     const defaultModel = await screen.findByLabelText("默认模型");
     fireEvent.change(defaultModel, { target: { value: "qwen" } });
     fireEvent.change(screen.getByLabelText("发布说明"), { target: { value: "Prefer qwen" } });
-    fireEvent.click(screen.getByRole("button", { name: "校验" }));
+    fireEvent.click(screen.getByRole("button", { name: "校验版本" }));
 
     expect(await screen.findByText(/校验通过/)).toBeTruthy();
     expect(writes.map((item) => item.method)).toEqual(["POST", "PUT", "POST"]);
@@ -192,7 +192,7 @@ describe("Configuration page", () => {
       expect(headers.get("Origin")).toBe(window.location.origin);
     }
     expect(current.snapshot.router.default_model).toBe("qwen");
-    expect(screen.getByRole("button", { name: "生成待发布版本" }).hasAttribute("disabled")).toBe(false);
+    expect(screen.getByRole("button", { name: "生成配置版本" }).hasAttribute("disabled")).toBe(false);
     expect(screen.getByLabelText("托管配置 YAML").textContent).toContain("default_model: \"qwen\"");
   });
 
@@ -204,12 +204,10 @@ describe("Configuration page", () => {
     }]);
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => commonGet(details(input).path, [invalid])));
     render(<ConfigurationPage csrf="csrf-value" onUnauthorized={vi.fn()} />);
-    expect((await screen.findByRole("alert")).textContent).toContain(
-      "Router-internal model IDs cannot be used as upstream candidates",
-    );
-    expect(screen.getByRole("button", { name: "生成待发布版本" }).hasAttribute("disabled")).toBe(true);
+    expect((await screen.findByRole("alert")).textContent).toContain("不能将路由器内部模型 ID 用作上游候选模型");
+    expect(screen.getByRole("button", { name: "生成配置版本" }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByLabelText("判断模型")).toBeTruthy();
-    expect(screen.getByLabelText("TTL seconds")).toBeTruthy();
+    expect(screen.getByLabelText("缓存有效期（秒）")).toBeTruthy();
   });
 
   it("finalizes to a pending version and exposes activation controls", async () => {
@@ -227,10 +225,10 @@ describe("Configuration page", () => {
       return commonGet(request.path, [current]);
     }));
     render(<ConfigurationPage csrf="csrf-value" onUnauthorized={vi.fn()} />);
-    fireEvent.click(await screen.findByRole("button", { name: "生成待发布版本" }));
+    fireEvent.click(await screen.findByRole("button", { name: "生成配置版本" }));
     expect(await screen.findByText(/版本 2 已进入待发布状态/)).toBeTruthy();
     const activityView = render(<ConfigurationPage csrf="csrf-value" onUnauthorized={vi.fn()} view="activity" />);
-    expect(await screen.findByText("pending")).toBeTruthy();
+    expect(await screen.findByText("待发布")).toBeTruthy();
     expect(screen.getAllByRole("button", { name: "启用" }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("button", { name: "回滚" }).length).toBeGreaterThan(0);
     activityView.unmount();
