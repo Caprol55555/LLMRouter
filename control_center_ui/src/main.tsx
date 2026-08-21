@@ -46,6 +46,7 @@ type Runtime = {
   schema_version: number | null;
   config_version_id: number | null;
   config_version_number: number | null;
+  deployment_time?: string;
 };
 type Health = {
   status: string;
@@ -84,6 +85,10 @@ function translateValue(value: string | null | undefined): string {
 
 function fmtNumber(value: number | null, suffix = "") {
   return value == null ? "—" : `${value.toFixed(value >= 100 ? 0 : 1)}${suffix}`;
+}
+
+function fmtDate(value: string | undefined) {
+  return value ? new Date(value).toLocaleString() : "未知";
 }
 
 export function App() {
@@ -241,6 +246,7 @@ export function App() {
           <button className="secondary" onClick={() => void logout()}>退出登录</button>
         </div>
       </header>
+      <div className="deployment-banner">最后更新部署时间：<strong>{fmtDate(runtime?.deployment_time)}</strong></div>
 
       {error && <Toast message={error} tone="error" onClose={() => setError("")} />}
       <nav className="primary-nav" aria-label="管理中心页面">
@@ -268,7 +274,11 @@ export function App() {
           </nav>
           {loading && !overview ? <div className="state">正在加载遥测数据…</div> : summary && (
             <>
-          <section className="cards" aria-label="概览指标">
+          <section className="overview-hero">
+            <div><span className="eyebrow">运行总览 · {windowKey === "1h" ? "最近 1 小时" : windowKey === "24h" ? "最近 24 小时" : "最近 7 天"}</span><h2>路由运行得怎么样？</h2><p>从请求量、成功率、缓存和延迟四个维度快速判断当前服务状态。</p></div>
+            <div className="hero-status"><span className={`health-dot ${health?.status === "ok" ? "ok" : "warn"}`} />{health?.status === "ok" ? "运行正常" : "需要关注"}</div>
+          </section>
+          <section className="cards overview-metrics" aria-label="概览指标">
             <Metric label="外部请求" value={String(summary.request_count)} />
             <Metric label="判断调用" value={`${summary.judge_calls} · ${summary.judge_amplification.toFixed(2)}×`} />
             <Metric label="缓存命中" value={`${(summary.cache_hit_rate * 100).toFixed(1)}%`} />
@@ -277,6 +287,10 @@ export function App() {
             <Metric label="判断延迟" value={`${fmtNumber(summary.judge_latency_ms.p50, " ms")} / ${fmtNumber(summary.judge_latency_ms.p95, " ms")}`} hint="p50 / p95" />
             <Metric label="遥测状态" value={health?.telemetry?.status || health?.database.status || "未知"} hint={`队列 ${health?.telemetry?.queue_depth ?? 0}`} />
             <Metric label="丢弃事件" value={String(health?.telemetry?.dropped_events ?? 0)} hint={`${health?.telemetry?.database_errors ?? 0} 个数据库错误`} />
+          </section>
+          <section className="overview-analysis">
+            <article className="panel analysis-panel"><div className="panel-title"><h2>请求健康度</h2><span>成功与异常</span></div><div className="analysis-bars"><AnalysisBar label="成功请求" value={summary.success_rate * 100} display={`${(summary.success_rate * 100).toFixed(1)}%`} tone="good" /><AnalysisBar label="回退请求" value={summary.request_count ? (summary.fallback_count / summary.request_count) * 100 : 0} display={`${summary.fallback_count} 次`} tone="warn" /><AnalysisBar label="错误请求" value={summary.request_count ? (summary.error_count / summary.request_count) * 100 : 0} display={`${summary.error_count} 次`} tone="bad" /></div></article>
+            <article className="panel analysis-panel"><div className="panel-title"><h2>延迟概览</h2><span>毫秒</span></div><div className="latency-grid"><LatencyStat label="总延迟 p50" value={fmtNumber(summary.total_latency_ms.p50)} /><LatencyStat label="总延迟 p95" value={fmtNumber(summary.total_latency_ms.p95)} /><LatencyStat label="判断 p50" value={fmtNumber(summary.judge_latency_ms.p50)} /><LatencyStat label="判断 p95" value={fmtNumber(summary.judge_latency_ms.p95)} /></div></article>
           </section>
           <section className="panel distribution">
             <div className="panel-title"><h2>模型分布</h2><span>{windowKey}</span></div>
@@ -301,6 +315,14 @@ export function App() {
 
 function Metric({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return <article className="metric"><span>{label}</span><strong>{value}</strong>{hint && <small>{hint}</small>}</article>;
+}
+
+function AnalysisBar({ label, value, display, tone }: { label: string; value: number; display: string; tone: "good" | "warn" | "bad" }) {
+  return <div className="analysis-bar"><div><span>{label}</span><strong>{display}</strong></div><div className="analysis-track"><div className={`analysis-fill ${tone}`} style={{ width: `${Math.min(100, Math.max(0, value))}%` }} /></div></div>;
+}
+
+function LatencyStat({ label, value }: { label: string; value: string }) {
+  return <div className="latency-stat"><span>{label}</span><strong>{value}</strong></div>;
 }
 
 function RequestsPanel({

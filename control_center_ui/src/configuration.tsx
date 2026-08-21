@@ -102,9 +102,11 @@ type AuditPage = {
 type LabResult = {
   result: {
     selected_model: string;
+    assistant_message?: string;
     judge_status: string;
     used_default: boolean;
     judge_latency_ms: number | null;
+    elapsed_ms?: number;
     traffic_class: string;
     persisted: boolean;
   };
@@ -237,13 +239,14 @@ export function ConfigurationPage({
   const [notice, setNotice] = useState("");
   const [labText, setLabText] = useState("");
   const [labResult, setLabResult] = useState<LabResult | null>(null);
-  const [labVersionId, setLabVersionId] = useState("");
+  const [labRouteId, setLabRouteId] = useState("");
   const [discovery, setDiscovery] = useState<DiscoveryResult | null>(null);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [editorOpen, setEditorOpen] = useState(false);
   const [modelSearch, setModelSearch] = useState("");
   const [selectedDiscoveredModels, setSelectedDiscoveredModels] = useState<string[]>([]);
-  const [newAlias, setNewAlias] = useState("");
-  const [labMessages, setLabMessages] = useState<Array<{ role: "user" | "assistant"; text: string; meta?: string }>>([]);
+  const [newModelId, setNewModelId] = useState("");
+  const [labMessages, setLabMessages] = useState<Array<{ role: "user" | "assistant"; text: string; createdAt: string; meta?: string }>>([]);
 
   function handleError(reason: unknown) {
     const apiError = reason as ApiError;
@@ -270,6 +273,7 @@ export function ConfigurationPage({
         ? candidate
         : routes[0]?.draft_id || "";
       setSelectedId(nextSelected);
+      if (nextSelected) setEditorOpen(true);
       if (!nextSelected) {
         setDraft(null);
         setEditable(null);
@@ -388,6 +392,7 @@ export function ConfigurationPage({
         body: JSON.stringify({ release_notes: "", name: "未命名草稿" }),
       });
       setNotice("已从当前配置创建智能路由版本。");
+      setEditorOpen(true);
       await loadPage(created.draft_id);
     });
   }
@@ -479,24 +484,29 @@ export function ConfigurationPage({
 
   async function saveModelCatalog() {
     await perform(async () => {
-      await api("/admin/api/configuration/model-catalog", {
+      const saved = await api<{ models: string[] }>("/admin/api/configuration/model-catalog", {
         method: "PUT",
         headers: writeHeaders(),
         body: JSON.stringify({ models: selectedDiscoveredModels }),
       });
+      setSummary((current) => current ? { ...current, model_catalog: saved.models } : current);
       setModelMenuOpen(false);
       setNotice("模型清单已保存。");
     });
   }
 
   function addDraftModel() {
-    const alias = newAlias.trim();
-    if (!alias || !editable || editable.llms[alias]) return;
+    const modelId = newModelId.trim();
+    if (!modelId || !editable) return;
+    const baseAlias = modelId.replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "模型";
+    let alias = baseAlias;
+    let suffix = 2;
+    while (editable.llms[alias]) alias = `${baseAlias}-${suffix++}`;
     mutate((snapshot) => {
-      snapshot.llms[alias] = { model: alias, description: "", max_tokens: 4096, context_limit: 32768 };
+      snapshot.llms[alias] = { model: modelId, description: "", max_tokens: 4096, context_limit: 32768 };
       snapshot.router.allowed_models = [...new Set([...snapshot.router.allowed_models, alias])].sort();
     });
-    setNewAlias("");
+    setNewModelId("");
   }
 
   function removeDraftModel(alias: string) {
@@ -511,11 +521,11 @@ export function ConfigurationPage({
   async function runLab() {
     const text = labText.trim();
     if (!text) return;
-    setLabMessages((current) => [...current, { role: "user", text }]);
+    const createdAt = new Date().toISOString();
+    setLabMessages((current) => [...current, { role: "user", text, createdAt }]);
     await perform(async () => {
       const body: Record<string, unknown> = { text };
-      if (labVersionId) body.version_id = Number(labVersionId);
-      if (draft?.status !== "finalized" && draft?.draft_id) body.route_id = draft.draft_id;
+      if (labRouteId) body.route_id = labRouteId;
       const result = await api<LabResult>("/admin/api/route-lab/evaluate", {
         method: "POST",
         headers: writeHeaders(),
@@ -525,10 +535,17 @@ export function ConfigurationPage({
       setLabResult(result);
       setLabMessages((current) => [...current, {
         role: "assistant",
-        text: `已选择模型：${result.result.selected_model}`,
-        meta: `${result.result.judge_status === "used" ? "已使用判断模型" : "未使用判断模型"} · ${result.result.judge_latency_ms == null ? "—" : `${result.result.judge_latency_ms.toFixed(1)} 毫秒`} · 不会持久化`,
+        text: result.result.assistant_message || `已选择模型：${result.result.selected_model}`,
+        createdAt: new Date().toISOString(),
+        meta: `${result.result.elapsed_ms == null ? "—" : `${result.result.elapsed_ms.toFixed(1)} 毫秒`} · ${result.result.selected_model}`,
       }]);
     });
+  }
+
+  function clearLab() {
+    setLabMessages([]);
+    setLabResult(null);
+    setLabText("");
   }
 
   async function deleteDraft() {
@@ -580,29 +597,32 @@ export function ConfigurationPage({
           </div>
           <button onClick={() => void createDraft()} disabled={actionBusy}>新建智能路由版本</button>
         </div>
-        <label className="field compact-field" htmlFor="draft-selector">
-          <span>当前智能路由版本</span>
-          <select
-            id="draft-selector"
-            value={selectedId}
-            onChange={(event) => setSelectedId(event.target.value)}
-          >
-            <option value="">未选择版本</option>
-            {summary.smart_routes.map((item) => (
-              <option key={item.draft_id} value={item.draft_id}>
-                {item.name || "未命名智能路由"} · {translateStatus(item.status)} · 修订 {item.revision}{item.is_active ? " · 已启用" : ""}
-              </option>
-            ))}
-          </select>
-        </label>
-        {!summary.smart_routes.length && <div className="state">暂无智能路由版本，请新建一个版本。</div>}
+        <div className="route-version-list" aria-label="智能路由版本列表">
+          {!summary.smart_routes.length && <div className="state">暂无智能路由版本，请新建一个版本。</div>}
+          {summary.smart_routes.map((item) => (
+            <button
+              type="button"
+              key={item.draft_id}
+              className={`route-version-item ${selectedId === item.draft_id ? "selected" : ""} ${item.is_active ? "enabled" : "disabled"}`}
+              onClick={() => { setSelectedId(item.draft_id); setEditorOpen(true); }}
+            >
+              <span className="route-version-name">{item.name || "未命名智能路由"}</span>
+              <span className="route-version-meta">{translateStatus(item.status)} · 修订 {item.revision}</span>
+              <span className={`route-state ${item.is_active ? "enabled" : "disabled"}`}>{item.is_active ? "已启用" : "未启用"}</span>
+            </button>
+          ))}
+        </div>
         {!!summary.active_smart_routes.length && <div className="active-route-list"><strong>已启用智能路由</strong><div>{summary.active_smart_routes.map((item) => <span className="route-tag" key={item.draft_id}>{item.name || "未命名智能路由"}</span>)}</div></div>}
       </section>}
 
       {view === "configuration" && <section className="panel">
         <div className="panel-title"><h2>模型清单</h2><span>选择可用于智能路由的上游模型</span></div>
+        <div className="selected-catalog" aria-label="当前选中模型">
+          <span>当前选中模型</span>
+          {summary.model_catalog?.length ? summary.model_catalog.map((model) => <span className="catalog-chip" key={model}>{model}</span>) : <small>尚未配置可用模型</small>}
+        </div>
         <button className="secondary" onClick={() => { setModelMenuOpen(true); void runDiscovery(); }} disabled={actionBusy}>发现可用模型</button>
-        {modelMenuOpen && <div className="model-menu">
+        {modelMenuOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setModelMenuOpen(false); }}><div className="model-menu model-menu-modal">
           <div className="model-menu-toolbar">
             <div className="selected-models" aria-label="已勾选模型">
               <span>已勾选模型</span>
@@ -614,12 +634,14 @@ export function ConfigurationPage({
             {(discovery?.models || summary.model_catalog || []).filter((model) => model.toLowerCase().includes(modelSearch.toLowerCase())).map((model) => <button key={model} type="button" className={`model-option ${selectedDiscoveredModels.includes(model) ? "selected" : ""}`} onClick={() => setSelectedDiscoveredModels((current) => current.includes(model) ? current.filter((item) => item !== model) : [...current, model])}>{selectedDiscoveredModels.includes(model) ? "已选择 · " : ""}{model}</button>)}
           </div>
           <div className="actions model-menu-actions"><button onClick={() => void saveModelCatalog()}>确认</button><button className="secondary" onClick={() => { setSelectedDiscoveredModels(summary.model_catalog || []); setModelSearch(""); setModelMenuOpen(false); }}>取消</button></div>
-        </div>}
+        </div></div>}
       </section>}
 
       {draftLoading && <div className="state">正在加载智能路由版本…</div>}
-      {view === "configuration" && draft && editable && !draftLoading && (
-        <>
+      {view === "configuration" && editorOpen && draft && editable && !draftLoading && (
+        <div className="modal-backdrop editor-backdrop">
+          <div className="route-editor-modal">
+            <button type="button" className="secondary editor-close" onClick={() => setEditorOpen(false)}>关闭编辑器</button>
           <section className="panel">
             <div className="panel-title configuration-title">
               <div>
@@ -769,7 +791,10 @@ export function ConfigurationPage({
                   <article className="backend-card" key={alias}>
                     <h3>{alias} <button type="button" className="danger compact-remove" onClick={() => removeDraftModel(alias)}>删除</button></h3>
                     <Field label="上游模型" htmlFor={`model-${alias}`}>
-                      <input id={`model-${alias}`} value={editable.llms[alias].model} onChange={(event) => mutate((snapshot) => { snapshot.llms[alias].model = event.target.value; })} />
+                      <select id={`model-${alias}`} value={editable.llms[alias].model} onChange={(event) => mutate((snapshot) => { snapshot.llms[alias].model = event.target.value; })}>
+                        {summary.model_catalog?.map((model) => <option key={model} value={model}>{model}</option>)}
+                        {editable.llms[alias].model && !summary.model_catalog?.includes(editable.llms[alias].model) && <option value={editable.llms[alias].model}>{editable.llms[alias].model}（未在模型清单）</option>}
+                      </select>
                     </Field>
                     <Field label="模型说明" htmlFor={`description-${alias}`}>
                       <textarea id={`description-${alias}`} rows={3} value={editable.llms[alias].description} onChange={(event) => mutate((snapshot) => { snapshot.llms[alias].description = event.target.value; })} />
@@ -784,7 +809,7 @@ export function ConfigurationPage({
                   </article>
                 ))}
               </div>
-              <div className="actions model-add-row"><input value={newAlias} onChange={(event) => setNewAlias(event.target.value)} placeholder="输入模型别名" /><button type="button" className="secondary" onClick={addDraftModel}>添加模型</button></div>
+              <div className="actions model-add-row"><select aria-label="选择要添加的模型" value={newModelId} onChange={(event) => setNewModelId(event.target.value)}><option value="">选择可用模型</option>{summary.model_catalog?.map((model) => <option key={model} value={model}>{model}</option>)}</select><button type="button" className="secondary" onClick={addDraftModel} disabled={!newModelId}>添加模型</button></div>
             </fieldset>
 
             <Field label="发布说明" htmlFor="release-notes">
@@ -819,7 +844,8 @@ export function ConfigurationPage({
               <pre className="yaml-view" aria-label="托管配置 YAML">{toYaml(editable)}</pre>
             </section>
           </div>
-        </>
+          </div>
+        </div>
       )}
 
       {view === "activity" && <div className="configuration-columns">
@@ -858,10 +884,10 @@ export function ConfigurationPage({
       </div>}
 
       {view === "route-lab" && <section className="panel route-chat-panel">
-        <div className="panel-title"><div><h2>路由测试</h2><span>仅用于管理员测试，不会保存输入</span></div><label className="field route-version-field"><span>测试版本 ID（可选）</span><input id="route-lab-version" value={labVersionId} onChange={(event) => setLabVersionId(event.target.value)} inputMode="numeric" /></label></div>
+        <div className="panel-title"><div><h2>路由测试</h2><span>仅用于管理员测试，不会保存输入</span></div><div className="actions"><label className="field route-version-field"><span>已启用智能路由</span><select id="route-lab-route" value={labRouteId} onChange={(event) => setLabRouteId(event.target.value)}><option value="">当前运行配置</option>{summary.active_smart_routes.map((item) => <option key={item.draft_id} value={item.draft_id}>{item.name || "未命名智能路由"}</option>)}</select></label><button type="button" className="secondary" onClick={clearLab} disabled={!labMessages.length}>清除窗口</button></div></div>
         <div className="chat-thread" aria-live="polite">
           {!labMessages.length && <div className="chat-empty"><strong>开始测试智能路由</strong><span>输入一段任务文本，查看系统选择的模型和判断耗时。</span></div>}
-          {labMessages.map((message, index) => <div key={`${message.role}-${index}`} className={`chat-message ${message.role}`}><div className="chat-bubble">{message.text}</div>{message.meta && <small>{message.meta}</small>}</div>)}
+          {labMessages.map((message, index) => <div key={`${message.role}-${index}`} className={`chat-message ${message.role}`}><div className="chat-bubble">{message.text}</div><small>{new Date(message.createdAt).toLocaleTimeString()}{message.meta ? ` · ${message.meta}` : ""}</small></div>)}
         </div>
         <form className="chat-composer" onSubmit={(event) => { event.preventDefault(); void runLab(); }}>
           <textarea id="route-lab-text" rows={3} value={labText} onChange={(event) => setLabText(event.target.value)} placeholder="输入要测试的任务，例如：帮我总结这份报告" />

@@ -600,6 +600,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
         version="1.0.0",
         lifespan=lifespan,
     )
+    app.state.deployment_time = os.getenv("LLMROUTER_DEPLOYED_AT") or datetime.now(timezone.utc).isoformat()
 
     # Initialize components
     router = OpenClawRouter(config)
@@ -825,6 +826,8 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
     def telemetry_model_label(requested_model: str) -> str:
         if requested_model in config.llms:
             return requested_model
+        if enabled_route_for_model(requested_model) is not None:
+            return requested_model
         if parse_auto_policy(requested_model, config.session_routing) is not None:
             return requested_model
         return "invalid"
@@ -975,6 +978,38 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
             raise ConfigurationError("Configuration service is unavailable")
         return service
 
+    def enabled_route_for_model(model_id: str) -> Optional[Dict[str, Any]]:
+        service = control_center.configuration
+        if service is None:
+            return None
+        for route in service.list_active_drafts():
+            if (route.get("name") or "").strip() == model_id:
+                return route
+        return None
+
+    def runtime_for_enabled_route(model_id: str, current: RuntimeBundle) -> Optional[RuntimeBundle]:
+        route = enabled_route_for_model(model_id)
+        if route is None:
+            return None
+        draft = configuration_service().get_draft(route["draft_id"])
+        snapshot = normalize_snapshot(draft["snapshot"], current.config.llms)
+        issues = validate_snapshot(
+            snapshot,
+            configured_aliases=current.config.llms,
+            forbidden_models=current.config.security.forbidden_upstream_models,
+            forbidden_prefixes=current.config.security.forbidden_upstream_prefixes,
+        )
+        if issues:
+            raise DraftValidationError(issues)
+        return build_runtime_candidate(
+            {
+                "version_id": current.version_id,
+                "version_number": current.version_number,
+                "snapshot": snapshot,
+            },
+            current,
+        )
+
     def record_admin_audit(
         action: str,
         outcome: str,
@@ -1041,12 +1076,14 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
         session_header: Optional[str],
         bundle: RuntimeBundle,
         judge_observer: Optional[Callable[[JudgeOutcome], None]] = None,
+        routing_model: Optional[str] = None,
     ) -> RoutingDecision:
         request_config = bundle.config
         request_router = bundle.router
         request_route_cache = bundle.route_cache
         available_models = list(request_config.llms.keys())
-        if payload.model in available_models:
+        requested_model = routing_model or payload.model
+        if payload.model in available_models and routing_model is None:
             _safe_log(f"[Route] explicit model={payload.model}")
             return RoutingDecision(
                 selected_model=payload.model,
@@ -1056,7 +1093,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                 judge_outcome=None,
             )
 
-        policy = parse_auto_policy(payload.model, request_config.session_routing)
+        policy = parse_auto_policy(requested_model, request_config.session_routing)
         if policy is None:
             raise HTTPException(status_code=404, detail=f"Model '{payload.model}' not found")
 
@@ -1329,6 +1366,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                 "schema_version": control_center.schema_version,
                 "config_version_id": active["version_id"] if active else None,
                 "config_version_number": active["version_number"] if active else None,
+                "deployment_time": app.state.deployment_time,
             },
             headers={"Cache-Control": "no-store"},
         )
@@ -1671,6 +1709,25 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
             payload = ChatRequest(model="auto", messages=[Message(role="user", content=text_value)])
             decision = await choose_request_model(payload, [{"role": "user", "content": text_value}], None, candidate)
             outcome = decision.judge_outcome
+            try:
+                completion = await candidate.backend.call(
+                    decision.selected_model,
+                    [{"role": "user", "content": text_value}],
+                    max_tokens=1024,
+                    temperature=None,
+                    stream=False,
+                )
+            except Exception:
+                # Route Lab remains useful when an upstream is unavailable: the
+                # selected route and timing are still returned as a test result.
+                completion = {}
+            assistant_message = ""
+            if isinstance(completion, dict) and completion.get("choices"):
+                assistant_message = str(
+                    completion["choices"][0].get("message", {}).get("content") or ""
+                )
+            if not assistant_message:
+                assistant_message = f"已选择模型：{decision.selected_model}（上游暂时没有返回内容）"
             emit_routing_event(
                 request_id=lab_request_id,
                 event_kind="request_completed",
@@ -1690,6 +1747,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                 "version_id": candidate.version_id,
                 "version_number": candidate.version_number,
                 "selected_model": decision.selected_model,
+                "assistant_message": assistant_message,
                 "cache_status": "disabled",
                 "judge_status": outcome.status if outcome else "not_called",
                 "used_default": outcome.used_default if outcome else False,
@@ -1697,6 +1755,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                 "elapsed_ms": (time.perf_counter() - started) * 1000,
                 "traffic_class": "admin_test",
                 "persisted": False,
+                "usage": completion.get("usage") if isinstance(completion, dict) else None,
             }
 
         result = {"result": await run_one(version_id, draft_id)}
@@ -1721,28 +1780,31 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
 
     @app.get("/v1/models")
     async def list_models():
-        current = current_runtime()
+        service = control_center.configuration
+        active_routes = service.list_active_drafts() if service else []
         return {
             "object": "list",
             "data": [
-                {"id": name, "object": "model", "description": llm.description}
-                for name, llm in current.config.llms.items()
-            ] + [
-                {"id": "auto", "object": "model", "description": "Session-aware auto router"},
-                {"id": "auto:once", "object": "model", "description": "Judge once per session TTL"},
-            ] + [
                 {
-                    "id": f"auto:{interval}",
+                    "id": str(route["name"]),
                     "object": "model",
-                    "description": f"Rejudge every {interval} new user turns",
+                    "description": route.get("release_notes") or "智能路由",
                 }
-                for interval in current.config.session_routing.allowed_rejudge_intervals
+                for route in active_routes
+                if str(route.get("name") or "").strip()
             ]
         }
 
     @app.post("/v1/chat/completions")
     async def chat_completions(payload: ChatRequest, http_request: Request):
         bundle = current_runtime()
+        active_routes = control_center.configuration.list_active_drafts() if control_center.configuration else []
+        route_bundle = runtime_for_enabled_route(payload.model, bundle)
+        if active_routes and route_bundle is None:
+            raise HTTPException(status_code=404, detail=f"Model '{payload.model}' not found")
+        routing_model = "auto" if route_bundle is not None else None
+        if route_bundle is not None:
+            bundle = route_bundle
         request_config = bundle.config
         request_backend = bundle.backend
         request_route_cache = bundle.route_cache
@@ -1868,6 +1930,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                 http_request.headers.get(request_config.session_routing.trusted_session_header),
                 bundle,
                 judge_observer=record_judge,
+                routing_model=routing_model,
             )
         except Exception as error:
             record_completed("error", error_category=_error_category(error))
@@ -2207,6 +2270,16 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
             # Receive request
             data = await websocket.receive_json()
             payload = ChatRequest(**data)
+            active_routes = control_center.configuration.list_active_drafts() if control_center.configuration else []
+            route_bundle = runtime_for_enabled_route(payload.model, bundle)
+            if active_routes and route_bundle is None:
+                raise HTTPException(status_code=404, detail=f"Model '{payload.model}' not found")
+            routing_model = "auto" if route_bundle is not None else None
+            if route_bundle is not None:
+                bundle = route_bundle
+                request_config = bundle.config
+                request_backend = bundle.backend
+                request_route_cache = bundle.route_cache
             telemetry_model = telemetry_model_label(payload.model)
             request_id = uuid.uuid4().hex
             request_started = time.perf_counter()
@@ -2257,6 +2330,7 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
                 websocket.headers.get(request_config.session_routing.trusted_session_header),
                 bundle,
                 judge_observer=record_ws_judge,
+                routing_model=routing_model,
             )
             selected_model = decision.selected_model
             session_key = decision.session_key

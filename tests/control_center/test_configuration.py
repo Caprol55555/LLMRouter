@@ -363,6 +363,24 @@ def test_route_lab_uses_ephemeral_admin_test_and_does_not_persist_text(
         assert "temporary route lab input" not in audit.text
 
 
+def test_v1_models_exposes_only_enabled_named_smart_routes(temp_data_dir: Path, monkeypatch):
+    monkeypatch.setenv("LLMROUTER_ADMIN_TOKEN", "admin-secret")
+    app = create_app(config=build_config(temp_data_dir))
+    service = app.state.control_center.configuration
+    enabled = service.create_draft(name="生产智能路由")
+    service.set_draft_active(enabled["draft_id"], active=True)
+    disabled = service.create_draft(name="测试智能路由")
+
+    response = TestClient(app).get("/v1/models")
+    assert response.status_code == 200
+    assert response.json()["data"] == [{
+        "id": "生产智能路由",
+        "object": "model",
+        "description": "智能路由",
+    }]
+    assert disabled["name"] == "测试智能路由"
+
+
 def test_maintenance_integrity_report_is_read_only_and_healthy(
     temp_data_dir: Path, monkeypatch
 ):
