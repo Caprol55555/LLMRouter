@@ -139,6 +139,7 @@ jobs:
           config_dir="$RUNNER_TEMP/llmrouter-config"
           data_dir="$RUNNER_TEMP/llmrouter-data"
           mkdir -p "$config_dir" "$data_dir"
+          sudo chown 10001:10001 "$data_dir"
           cat > "$config_dir/config.yaml" <<'YAML'
           serve:
             host: 0.0.0.0
@@ -155,23 +156,34 @@ jobs:
             enabled: true
             data_dir: /data
           YAML
-          container_id="$(docker run -d --read-only --tmpfs /tmp --tmpfs /run \
+          container_name="llmrouter-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup() { docker rm -f "$container_name" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          container_id="$(docker run --name "$container_name" -d --read-only --tmpfs /tmp --tmpfs /run \
             --mount "type=bind,src=$config_dir,dst=/config,readonly" \
             --mount "type=bind,src=$data_dir,dst=/data" \
             --env LLMROUTER_ADMIN_TOKEN=ci-admin-token \
             --publish 18000:8000 llmrouter:ci)"
-          cleanup() { docker rm -f "$container_id" >/dev/null 2>&1 || true; }
-          trap cleanup EXIT
+          healthy=0
           for attempt in $(seq 1 30); do
             if curl --fail --silent http://127.0.0.1:18000/health >/tmp/health.json; then
+              healthy=1
               break
             fi
             sleep 1
           done
+          if [[ "$healthy" != "1" ]]; then
+            docker inspect "$container_id"
+            docker logs "$container_id"
+            exit 1
+          fi
           test -s /tmp/health.json
           grep -q '"status":"ok"' /tmp/health.json
-          test -f "$data_dir/control-center.db"
-          test -s "$data_dir/control-center.db"
+          if [[ ! -s "$data_dir/control-center.db" ]]; then
+            ls -la "$data_dir"
+            docker logs "$container_id"
+            exit 1
+          fi
       - name: Verify runtime dependency boundary
         run: |
           docker run --rm --entrypoint python llmrouter:ci -c \

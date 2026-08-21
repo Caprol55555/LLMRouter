@@ -216,7 +216,7 @@ class TelemetryService:
         self._database_errors = 0
         self._written_events = 0
         self._last_error_category: Optional[str] = None
-        self._last_cleanup = 0.0
+        self._last_cleanup: Optional[float] = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -355,7 +355,7 @@ class TelemetryService:
                 if event.event_kind == "request_completed":
                     cursor.execute(self.AGGREGATE_SQL, self._aggregate_row(event))
             now = time.monotonic()
-            if now - self._last_cleanup >= 3600:
+            if self._last_cleanup is None or now - self._last_cleanup >= 3600:
                 self._cleanup(cursor)
                 self._last_cleanup = now
             cursor.execute("COMMIT")
