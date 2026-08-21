@@ -85,7 +85,9 @@ jobs:
           printf '%s\n' 'LLMROUTER_INBOUND_API_KEY=ci-inbound-key' >> /tmp/llmrouter-ci.env
           printf '%s\n' 'NINE_ROUTER_INTERNAL_API_KEY=ci-upstream-key' >> /tmp/llmrouter-ci.env
           printf '%s\n' 'LLMROUTER_ADMIN_TOKEN=ci-admin-token' >> /tmp/llmrouter-ci.env
-          docker compose --env-file /tmp/llmrouter-ci.env \
+          cp /tmp/llmrouter-ci.env deploy/server/.env
+          trap 'rm -f deploy/server/.env' EXIT
+          docker compose --env-file deploy/server/.env \
             -f deploy/server/docker-compose.yml config --quiet
 
   image:
