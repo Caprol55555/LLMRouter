@@ -39,7 +39,7 @@ describe("Control Center dashboard states", () => {
   it("shows a loading state while the initial API calls are pending", () => {
     vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => undefined)));
     render(<App />);
-    expect(screen.getByText("Loading telemetry…")).toBeTruthy();
+    expect(screen.getByText("正在加载遥测数据…")).toBeTruthy();
   });
 
   it("falls back to the accessible login form when the session is unauthorized", async () => {
@@ -49,10 +49,10 @@ describe("Control Center dashboard states", () => {
     );
     render(<App />);
     expect(
-      await screen.findByRole("heading", { name: "LLMRouter Control Center" }),
+      await screen.findByRole("heading", { name: "LLMRouter 管理中心" }),
     ).toBeTruthy();
-    expect(screen.getByLabelText("Administrator token")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Sign in" })).toBeTruthy();
+    expect(screen.getByLabelText("管理员密码")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "登录" })).toBeTruthy();
   });
 
   it("shows a uniform login error without echoing the submitted token", async () => {
@@ -64,9 +64,9 @@ describe("Control Center dashboard states", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     render(<App />);
-    const input = await screen.findByLabelText("Administrator token");
+    const input = await screen.findByLabelText("管理员密码");
     fireEvent.change(input, { target: { value: "not-the-token" } });
-    fireEvent.submit(screen.getByRole("button", { name: "Sign in" }).closest("form")!);
+    fireEvent.submit(screen.getByRole("button", { name: "登录" }).closest("form")!);
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("Invalid administrator credentials");
     expect(alert.textContent).not.toContain("not-the-token");
@@ -102,8 +102,8 @@ describe("Control Center dashboard states", () => {
       }),
     );
     render(<App />);
-    expect(await screen.findByText("No routed requests in this window.")).toBeTruthy();
-    expect(screen.getByText("No requests match the current filters.")).toBeTruthy();
+    expect(await screen.findByText("此时间范围内没有路由请求。")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "活动记录" })).toBeTruthy();
   });
 
   it("renders a sanitized API error state", async () => {

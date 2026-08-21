@@ -335,7 +335,7 @@ export function ConfigurationPage({
         headers: writeHeaders(),
         body: JSON.stringify({ release_notes: "", name: "未命名草稿" }),
       });
-      setNotice("Draft created from the active configuration.");
+      setNotice("已从当前配置创建草稿。");
       await loadPage(created.draft_id);
     });
   }
@@ -358,8 +358,8 @@ export function ConfigurationPage({
       setReleaseNotes(validated.release_notes);
       setNotice(
         validated.status === "ready"
-          ? "Validation passed. The draft can be finalized as a pending version."
-          : "Validation completed with issues.",
+          ? "校验通过，草稿可以生成待发布版本。"
+          : "校验完成，但仍存在问题。",
       );
       await loadPage(validated.draft_id);
     });
@@ -377,7 +377,7 @@ export function ConfigurationPage({
         },
       );
       setNotice(
-        `Version ${version.version_number} is pending. Runtime configuration was not changed.`,
+        `版本 ${version.version_number} 已进入待发布状态，运行时配置未改变。`,
       );
       await loadPage(draft.draft_id);
       await loadDraft(draft.draft_id);

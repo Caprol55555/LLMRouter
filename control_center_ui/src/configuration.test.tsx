@@ -79,6 +79,8 @@ function draft(status: "editing" | "ready" | "finalized" = "editing", issues: un
     release_notes: status === "ready" ? "Prefer qwen" : "",
     created_at: "2026-08-20T00:01:00+00:00",
     updated_at: "2026-08-20T00:01:00+00:00",
+    name: "测试草稿",
+    is_active: false,
     snapshot: JSON.parse(JSON.stringify(snapshot)),
   };
 }
@@ -100,6 +102,8 @@ function pageSummary(drafts: ReturnType<typeof draft>[] = []) {
     active,
     read_only: readOnly,
     drafts: drafts.map(({ snapshot: _snapshot, ...item }) => item),
+    active_drafts: drafts.filter((item) => item.is_active).map(({ snapshot: _snapshot, ...item }) => item),
+    model_catalog: ["glm-upstream", "qwen-upstream"],
   };
 }
 
@@ -124,13 +128,15 @@ describe("Configuration page", () => {
     const pending = vi.fn(() => new Promise<Response>(() => undefined));
     vi.stubGlobal("fetch", pending);
     const view = render(<ConfigurationPage csrf="csrf-value" onUnauthorized={vi.fn()} />);
-    expect(screen.getByText("Loading configuration…")).toBeTruthy();
+    expect(screen.getByText("正在加载配置…")).toBeTruthy();
     view.unmount();
 
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => commonGet(details(input).path)));
-    render(<ConfigurationPage csrf="csrf-value" onUnauthorized={vi.fn()} />);
-    expect(await screen.findByText("No drafts. Create one from the active version.")).toBeTruthy();
-    expect(screen.getByText("No recent management events.")).toBeTruthy();
+    const emptyView = render(<ConfigurationPage csrf="csrf-value" onUnauthorized={vi.fn()} />);
+    expect(await screen.findByText("暂无草稿，请从当前版本新建。")).toBeTruthy();
+    emptyView.unmount();
+    render(<ConfigurationPage csrf="csrf-value" onUnauthorized={vi.fn()} view="activity" />);
+    expect(await screen.findByText("暂无管理事件。")).toBeTruthy();
   });
 
   it("renders a sanitized error and revokes unauthorized state", async () => {
@@ -172,13 +178,13 @@ describe("Configuration page", () => {
     }));
 
     render(<ConfigurationPage csrf="csrf-value" onUnauthorized={vi.fn()} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Create draft" }));
-    const defaultModel = await screen.findByLabelText("Default model");
+    fireEvent.click(await screen.findByRole("button", { name: "新建草稿" }));
+    const defaultModel = await screen.findByLabelText("默认模型");
     fireEvent.change(defaultModel, { target: { value: "qwen" } });
-    fireEvent.change(screen.getByLabelText("Release notes"), { target: { value: "Prefer qwen" } });
-    fireEvent.click(screen.getByRole("button", { name: "Validate" }));
+    fireEvent.change(screen.getByLabelText("发布说明"), { target: { value: "Prefer qwen" } });
+    fireEvent.click(screen.getByRole("button", { name: "校验" }));
 
-    expect(await screen.findByText(/Validation passed/)).toBeTruthy();
+    expect(await screen.findByText(/校验通过/)).toBeTruthy();
     expect(writes.map((item) => item.method)).toEqual(["POST", "PUT", "POST"]);
     for (const write of writes) {
       const headers = new Headers(write.init?.headers);
@@ -186,8 +192,8 @@ describe("Configuration page", () => {
       expect(headers.get("Origin")).toBe(window.location.origin);
     }
     expect(current.snapshot.router.default_model).toBe("qwen");
-    expect(screen.getByRole("button", { name: "Finalize pending version" }).hasAttribute("disabled")).toBe(false);
-    expect(screen.getByLabelText("Managed configuration YAML").textContent).toContain("default_model: \"qwen\"");
+    expect(screen.getByRole("button", { name: "生成待发布版本" }).hasAttribute("disabled")).toBe(false);
+    expect(screen.getByLabelText("托管配置 YAML").textContent).toContain("default_model: \"qwen\"");
   });
 
   it("shows validation issues and blocks finalization", async () => {
@@ -201,8 +207,8 @@ describe("Configuration page", () => {
     expect((await screen.findByRole("alert")).textContent).toContain(
       "Router-internal model IDs cannot be used as upstream candidates",
     );
-    expect(screen.getByRole("button", { name: "Finalize pending version" }).hasAttribute("disabled")).toBe(true);
-    expect(screen.getByLabelText("Judge model")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "生成待发布版本" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByLabelText("判断模型")).toBeTruthy();
     expect(screen.getByLabelText("TTL seconds")).toBeTruthy();
   });
 
@@ -221,11 +227,12 @@ describe("Configuration page", () => {
       return commonGet(request.path, [current]);
     }));
     render(<ConfigurationPage csrf="csrf-value" onUnauthorized={vi.fn()} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Finalize pending version" }));
-    expect(await screen.findByText(/Version 2 is pending/)).toBeTruthy();
-    expect(screen.getByText("pending")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /publish/i })).toBeNull();
-    expect(screen.getByRole("button", { name: /activate/i })).toBeTruthy();
-    expect(screen.getByRole("button", { name: /rollback/i })).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: "生成待发布版本" }));
+    expect(await screen.findByText(/版本 2 已进入待发布状态/)).toBeTruthy();
+    const activityView = render(<ConfigurationPage csrf="csrf-value" onUnauthorized={vi.fn()} view="activity" />);
+    expect(await screen.findByText("pending")).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: "启用" }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("button", { name: "回滚" }).length).toBeGreaterThan(0);
+    activityView.unmount();
   });
 });
