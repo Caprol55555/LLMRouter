@@ -11,6 +11,9 @@ downloads/
 eggs/
 .eggs/
 lib/
+# Frontend source helpers live under a directory named lib and must be tracked.
+!control_center_ui/src/lib/
+!control_center_ui/src/lib/**
 lib64/
 parts/
 sdist/
