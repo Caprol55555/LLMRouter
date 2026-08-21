@@ -1,0 +1,38 @@
+site_name: LLMRouter Documentation
+site_description: Production routing, Control Center, telemetry, and operations documentation
+site_url: https://caprol55555.github.io/LLMRouter/
+repo_name: Caprol55555/LLMRouter
+repo_url: https://github.com/Caprol55555/LLMRouter
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+
+nav:
+  - Overview: index.md
+  - Control Center:
+      - Architecture: control-center-architecture.md
+      - Admin dashboard: control-center-admin-dashboard.md
+      - Telemetry: control-center-telemetry.md
+      - Operations: control-center-operations.md
+      - Development plan: control-center-development-plan.md
+  - Architecture decisions:
+      - SQLite and runtime isolation: adr-001-control-center-sqlite-and-runtime.md
+      - Drafts and version history: adr-002-configuration-drafts-and-version-history.md
+      - Atomic activation and Route Lab: adr-003-atomic-activation-and-route-lab.md
